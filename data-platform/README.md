@@ -17,11 +17,11 @@ Chosen from the frequency of requirements across 20 Korean data-platform posting
 | Spark / PySpark | 18/20 | M1 |
 | Airflow | 18/20 | M2 |
 | Python | 16/20 | M1 |
-| Kafka | 14/20 | M4, envelopes only |
+| Kafka | 14/20 | M5, replayed event-time workload |
 | Kubernetes | 10/20 | already held |
 | SQL / data modelling | 10/20 | M1 |
-| Trino / Presto | 5/20 | M4 |
-| Iceberg / Delta / Hudi | 4/20 | M1 and M4 |
+| Trino / Presto | 5/20 | M1 and M5 |
+| Iceberg / Delta / Hudi | 4/20 | M1 |
 | MongoDB | 1/20 | **not used** |
 
 Deliberately excluded: Flink (9/20 is not low, but learning a fourth engine while Spark, Kafka and
@@ -30,9 +30,11 @@ out of our hands), dbt (this is a platform, not analytics engineering), and Mong
 in twenty, and in that one it appears as an example of database experience rather than as a
 requirement. Adding it without a question it answers would be a list of technologies.
 
-Iceberg over Delta because the Korean sample mentions Iceberg twice against Delta once; Delta
-returns in M4 as a comparison rather than a replacement, since the autonomous-driving postings that
-name a format name Delta.
+Iceberg over Delta because the Korean sample mentions Iceberg twice against Delta once. The
+autonomous-driving postings that name a format name Delta, so the reason for the choice is written
+down here rather than settled by a benchmark: a head-to-head run designed by the person who already
+picked the winner is easy to arrange and answers no decision anyone is making. One format is
+carried the whole way through instead.
 
 ## The boundary
 
@@ -61,10 +63,20 @@ policy, checksum verification and orphan reconciliation are ours to build.
 Ordered by dependency, not by calendar. Throughput measured before reconciliation is proven
 measures nothing, and embeddings over a corpus that cannot be searched cannot be evaluated.
 
+The streaming layer comes last, and the reason is not that the dataset is static. Replaying
+nuScenes at its recorded timestamps is a real event-time workload — the sensors run at different
+rates, so out-of-order arrival and skew between event time and arrival time are properties of the
+data rather than noise added to make the exercise look harder. What is missing early is not the
+workload but the verdict. Exactly-once is demonstrated by showing that the table built by streaming
+matches the table built by batch, row for row, over the same scenes; **the batch pipeline is the
+oracle for the streaming one**, so it has to be right first. M5 could be built at any point. It
+could not be believed until M1 exists.
+
 **M1 — canonical lakehouse.** PySpark normalises `scene`/`sample`/`sample_data` into one scene
 commit; the blob contract is established; clock skew, missing sensors, duplicates and out-of-order
-frames are detected; failures land in a quarantine table rather than in the release.
-*Excluded here: throughput headlines, S3, clusters, the Delta comparison.*
+frames are detected; failures land in a quarantine table rather than in the release. Trino reads
+the result, snapshot time travel included.
+*Excluded here: throughput headlines, S3, clusters, streaming.*
 
 **M2 — reproducible training supply.** Airflow runs backfill → quality gate → publish, with an
 injected task failure repaired idempotently and partial backfill by scene, sensor, date or quality
@@ -76,15 +88,22 @@ and permissions — not performance. A PyTorch dataloader measures what actually
 ranges, not files; Recall@K and latency say whether the search is right rather than whether it
 exists. Query set and ground truth are fixed *before* the embeddings are built.
 
-**M4 — event layer and format comparison.** Kafka carries envelopes — `uri`, `checksum`,
-`schema_version`, `start/end_ts` — never sensor payloads. Iceberg and Delta meet on one shared
-late-arriving backfill workload rather than a feature checklist. Trino provides the SQL layer.
-
-**M5 — failure mining and promotion.** Three to five corner-case queries (excessive clock skew,
+**M4 — failure mining and promotion.** Three to five corner-case queries (excessive clock skew,
 camera blackout, sparse LiDAR, hard braking, annotation disagreement) produce slices that get
 promoted into an evaluation set and a new dataset version, closing the loop back to M1. An optional
 MCAP/rosbag2 adapter covers the interchange concept that US robotics postings ask for by
 description rather than by product name.
+
+**M5 — streaming ingest and the equivalence proof.** Kafka replays scenes at their recorded
+timestamps, at the rates the nuScenes specification states — six cameras at 12 Hz, `LIDAR_TOP` at
+20 Hz, five radars at 13 Hz, keyframes at 2 Hz — which M1 has already checked against the data
+rather than taken on trust. Different rates mean arrival order and event-time order genuinely
+disagree, so watermarks and late-arrival handling have something to do. Kafka carries envelopes —
+`uri`, `checksum`, `schema_version`, `start/end_ts` — never sensor payloads; the schema and the
+target table are M1's, unchanged. Duplicate events are injected and consumers are killed mid-stream
+to make the sink defend the handover between Kafka offset and Iceberg commit. The claim reduces to
+one line: **the streaming table equals the batch table, row for row, on the same scenes**, and
+Trino runs that diff. Without it the milestone would show only that Kafka was installed.
 
 ## Measurement rules
 
@@ -93,9 +112,14 @@ Fixed before any measurement, because these are what make a later number mean so
 - **`completeness` on undamaged input is 100%.** Anything less is data loss, not an achievement.
   Fault-detection recall is a different number on a different line; the two are never merged, and
   recall is reported per fault type rather than averaged.
-- **`freshness` does not exist until M4.** A static dataset has none. Once events flow it is
-  defined as *snapshot-queryable time − emit time* and labelled a replayed event-time workload.
-  Measured against the original sensor timestamp it would only measure how old nuScenes is.
+- **`freshness` does not exist until M5.** A static dataset has none. Once events flow it is
+  defined as *snapshot-queryable time − emit time* and labelled a replayed event-time workload,
+  with the replay speed stated. Measured against the original sensor timestamp it would only
+  measure how old nuScenes is, and presented as production freshness it would be a false claim.
+- **Exactly-once is a comparison, not a configuration.** It is claimed only as row-level equality
+  between the streaming table and the batch table over the same scenes, with duplicate injection
+  and forced consumer restarts inside the run being compared. Quoting a delivery-guarantee setting
+  out of a config file is not evidence that the setting held.
 - **`Recall@K` needs its ground truth first.** Choosing the correct answers after seeing the search
   results is not evaluation, it is justification.
 - **`$/TB` needs an honest denominator.** Structured bytes, blob bytes read for hashing, bytes
