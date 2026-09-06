@@ -8,6 +8,57 @@ dataset, corruption and gaps cannot pass silently, and a failing slice can be fo
 into the next dataset version. Close all three and it is a platform. Close only the first and it is
 an ETL demo.
 
+## The contract
+
+That question is what the project investigates. This is what it hands someone.
+
+> **A release id is the contract.** A curator names a slice — a query, a quality policy and a point
+> in time — and gets an identifier back. Hand that identifier to a loader on any machine at any
+> later date and you get the same rows and the same bytes, or a refusal naming the object that
+> changed.
+
+Three actors, and only one of them is a person. The **producer** is the ingest path, automated,
+filling tables from logs. The **curator** names a slice and approves or rejects the candidate. The
+**consumer** is a training or evaluation job that holds nothing but a release id.
+
+```
+$ dp release create --query "vehicle turning left while a pedestrian crosses" \
+                    --policy strict-v3 --as-of 2026-09-06T00:00:00Z
+  → rel_01J8XQ7…   candidate
+    1,284 samples · 9 sensors · 41 quarantined · 3 gates failed, 0 skipped
+    croissant: releases/rel_01J8XQ7…/croissant.json
+
+$ dp release approve rel_01J8XQ7…
+  → approved · training-eligible
+
+# six months later, a different machine
+$ dp dataset load rel_01J8XQ7…
+  → same rows, same bytes
+  → or: REFUSED — blob av2/…/315968…jpg checksum differs from the one pinned at approval
+```
+
+**The refusal is the point.** A platform that quietly returns slightly different data is worse than
+one that stops, because the first kind of failure reaches a model and the second reaches a person.
+
+The three senses of "reproducibly" in the question above are the three guarantees a release makes:
+
+| Guarantee | What it means | Built in | Scored by |
+|---|---|---|---|
+| **Determinism** | `load(R)` yields the same rows no matter what has been committed since | M1 — the release pin | the M4 equivalence check |
+| **Integrity** | every referenced blob matches the checksum pinned at approval, or the load fails loudly and names the object | M1 — the blob contract | TbV's labelled discrepancies in M5 |
+| **Legibility** | the release carries its gate outcomes — including the checks that were *skipped* — its policy and transform versions, and its provenance, in a machine-readable form | M1 gates, M2 Croissant | the Croissant validator |
+
+This is also what stops the milestones from being five unrelated experiments. Each one establishes a
+property of the same object:
+
+| | What it establishes about a release |
+|---|---|
+| **M1** | what a release pins, and the gates whose outcomes it carries |
+| **M2** | how fast a consumer can load one, and whether its metadata is a standard rather than an invention |
+| **M3** | that creating one is reproducible, operable and observable |
+| **M4** | that a release does not depend on which ingest path produced it |
+| **M5** | that the query selecting the slice is right, and that the quality numbers the release carries survive an outside answer key |
+
 ## How this is judged
 
 Every number a platform reports about itself is a number it also defined. That is the failure this
