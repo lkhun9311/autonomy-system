@@ -17,7 +17,7 @@ project is built against, so three of its results are computed by someone else.
 |---|---|---|
 | **MLPerf Storage v3.0** | how fast the storage path feeds training | M2 |
 | **Croissant 1.1** | whether release metadata is a standard, not an invention | M2 |
-| **RefAV · EvalAI 2469** | whether scenario retrieval is right, not merely self-consistent | M4 |
+| **RefAV · EvalAI 2469** | whether scenario retrieval is right, not merely self-consistent | M5 |
 
 MLPerf Storage is the primary one, because it measures this job. It emulates accelerators with
 sleep timers and reads real data through PyTorch at the intensity of a real training run, so it
@@ -39,14 +39,18 @@ recorded here as one so that the two are never conflated later.
                         │                              │                             │
                         ├──────────────────────────────┤                             │
                         │                              │                             │
-  ingest           M1 batch path                  M5 replay path                     │
-                      PySpark normalise              one producer per sensor         │
-                      one log commit                 stated + seeded arrival         │
-                      sensor-level gates             Kafka envelopes only            │
-                      │        └─▶ quarantine        offset ↔ commit                 │
+  ingest           M1 batch path                  M4 event backbone                  │
+                      PySpark normalise              topics partitioned by log_id    │
+                      one log commit                   blob.arrived   ~11 M events   │
+                      sensor-level gates               sweep.quality  ~0.7 M         │
+                      │        └─▶ quarantine          release.cdc    Debezium       │
+                      │                                replay.sensor  event-time     │
+                      │                              Schema Registry · Avro · compat │
+                      │                              Kafka Connect ─▶ Iceberg sink   │
+                      │                              DLQ ─▶ quarantine               │
                       │                              │                               │
                       ├──────────────────────────────┘                               │
-                      │                                                              │
+                      │  equivalence — batch table == stream table, row for row      │
   store           Iceberg — one schema, one set of tables  ◀─────────────────────────┘
                   log · sample · sensor_data · blob_ref · sweep_stat · track · event
                       ├──────────────────────────────┬───────────────────────────┐
@@ -63,11 +67,11 @@ recorded here as one so that the two are never conflated later.
                       │                              │
   prove             └──────────────┬───────────────┘
                                    │
-                 M4 TbV map change            M4 RefAV → EvalAI 2469
+                 M5 TbV map change            M5 RefAV → EvalAI 2469
                     LiDAR × camera × HD map      HOTA-Temporal
                     labelled discrepancies       baseline 50.1 · winner 53.4
                       │                              │
-  serve          M3 PyTorch dataloader        M4 corner case → new dataset version → back to M1
+  serve          M3 PyTorch dataloader        M5 corner case → new dataset version → back to M1
 ```
 
 ```
@@ -160,7 +164,7 @@ Differences of one or two postings sit inside its noise and nothing here rests o
 | Python | everything above the SQL layer | M1 | 16/20 |
 | Iceberg | snapshot atomicity, schema evolution, time travel under both ingest paths | M1 | 4/20 |
 | SQL / data modelling | the sensor · sample · blob · sweep · track · release model itself | M1 | 10/20 |
-| Trino | SQL and time travel over the canonical tables; the predicate side of scenario mining; the row-level diff in M5 | M1, M4, M5 | 5/20 |
+| Trino | SQL and time travel over the canonical tables; the predicate side of scenario mining; the row-level diff in M4 | M1, M4, M5 | 5/20 |
 | Lance | embeddings and random access, measured against Iceberg-plus-blobs on the MLPerf workload | M2 | — |
 | Airflow | backfill → quality gate → publish, with an injected failure repaired idempotently | M3 | 18/20 |
 | Terraform · S3 · IRSA | one deployment and permission path proved off the laptop — not performance | M3 | — |
@@ -168,16 +172,24 @@ Differences of one or two postings sit inside its noise and nothing here rests o
 | Argo CD | drift — whether what runs is what is in git | M3 | — |
 | Kubernetes | already held; carries the single small cluster run in M3 | M3 | 10/20 |
 | PyTorch dataloader | what actually reaches training, measured rather than assumed | M3 | — |
-| OpenCLIP | segment embeddings; the vector side of scenario mining | M4 | — |
-| Kafka | replayed event-time ingest of the same logs into the same tables | M5 | 14/20 |
+| Kafka | the ingest control plane — four topics partitioned by `log_id`, consumer groups, offsets as resumability, DLQ into quarantine | M4 | 14/20 |
+| Schema Registry | Avro envelope subjects with a stated compatibility policy, tested against the Iceberg table schema | M4 | — |
+| Kafka Connect | the Iceberg sink, and the connector/offset/snapshot operation the postings ask about by name | M4 | — |
+| Debezium | change data capture from the release-state Postgres, so release history is a table rather than a log | M4 | — |
+| OpenCLIP | segment embeddings; the vector side of scenario mining | M5 | — |
 | MongoDB | **not used** — one posting in twenty, and there as an example rather than a requirement | — | 1/20 |
 
 Deliberately excluded: Flink (9/20 is not low, but learning a fourth engine while Spark, Kafka and
 Airflow are all at zero lines means none of them gets deep), managed warehouses (they take `$/TB`
 out of our hands), and dbt (this is a platform, not analytics engineering).
 
+That exclusion is about breadth, and it is why Kafka Connect, Schema Registry and Debezium are *not*
+excluded by it. They are Kafka's own components rather than a fourth engine, and they are the
+components the postings name — connectors, snapshots, offsets, replica lag, subject compatibility.
+Adding them deepens the one streaming system instead of starting a second.
+
 Iceberg rather than Delta, and the honest reason is not a 2-to-1 count in a survey nobody can
-recompute. It is that one format has to be carried the whole way through for the M5 comparison to
+recompute. It is that one format has to be carried the whole way through for the M4 comparison to
 mean anything, and Iceberg is the one whose catalog and Trino path are already reachable here. The
 format question does not disappear — it moves to M2, where Lance meets it on a workload defined by
 MLCommons rather than by the person who picked the winner.
@@ -232,12 +244,42 @@ whether a LiDAR had a dead laser that afternoon. These checks live in M1 and eac
   This is the check TbV turns from an assertion into a measurement, because there the answer is
   known.
 
+### The event backbone is not a demonstration
+
+M1's batch path is deliberately free of Kafka, because it is the reference the streaming path is
+later checked against. That is the *only* reason Kafka is absent from M1, and it says nothing about
+how much of the platform runs on events. Four topics do, each partitioned by `log_id` so that
+per-log ordering is a property of the layout rather than a hope:
+
+| Topic | Volume | The question it exists to answer |
+|---|---:|---|
+| `blob.arrived` | ~11 M | when eleven million objects land, how does the platform know what to process, once each, and resume from where it stopped? |
+| `sweep.quality` | ~0.7 M | how does a failed sensor check become a new dataset version without a human polling a table? |
+| `release.cdc` | low | is the release state machine's history queryable as data, or only as application logs? |
+| `replay.sensor` | ~0.7 M | does event time hold up when arrival order and event order disagree? |
+
+Consumer groups supply the parallelism, offsets supply the resumability, and the dead-letter queue
+lands in the quarantine table that already exists — a poison envelope and a failed quality gate
+belong in the same place, and putting them there is the argument for having one.
+
+**Two schema systems now have to agree, and that is the interesting part.** Envelope subjects live
+in the Schema Registry as Avro with a stated compatibility policy; the target tables evolve under
+Iceberg's own rules. The gate is that a wire-schema change the table cannot accept fails CI before
+it reaches a topic — and like every gate here, it has to be shown to fail before it is believed.
+Nothing about a `binary` column changes: envelopes carry `uri`, `checksum`, `schema_version` and
+`start/end_ts`, never sensor payloads.
+
+Debezium supplies `release.cdc` from the Postgres that Airflow needs anyway, which is what turns
+the draft → gated → approved → deprecated state machine from application state into a table with a
+history. Kafka Connect runs the Iceberg sink. Neither is a fourth engine; both are the components
+the postings name.
+
 ## Milestones
 
 Ordered by dependency where one exists and by priority where it does not, and the two are labelled
-rather than blurred. M2 depends on M1 and nothing else. M4's two instruments depend on M1, and its
-map-change work depends on the sensor-level checks in M1 having somewhere to write. M5 depends only
-on M1 and is last by priority.
+rather than blurred. M2 and M3 depend on M1 and on nothing else. M4 depends on M1, because the batch
+table is what its equivalence check compares against. M5 depends on M4, because its promotion loop
+consumes `sweep.quality`, and on M1, because the checks that fill that topic live there.
 
 **M1 — canonical lakehouse and sensor-level quality.** PySpark normalises Argoverse 2 Sensor into
 one log commit; the blob contract and the release pin are established; the sensor-level checks above
@@ -261,25 +303,21 @@ S3, IAM/IRSA and `terraform plan` in CI, Argo CD reconciling `deploy/`, and one 
 that proves deployment and permissions — not performance. A PyTorch dataloader measures what
 actually reaches training; publication latency is first measurable here.
 
-**M4 — external ground truth.** Three things, each an outside opinion on a different claim.
-*Map change:* TbV's labelled HD-map discrepancies score the calibration-residual check against an
-answer key, which is the only way the sensor-level gates become a measurement. *Scenario mining:*
-RefAV's 10,000 natural-language queries over Argoverse 2 logs, answered twice — once by compiling
-queries to predicates over the `track` table in Trino, once by OpenCLIP embeddings over Lance — with
-both scored by HOTA-Temporal on EvalAI challenge 2469 rather than by a query set of our own.
-*Contract:* nuScenes through the same schema and the same gate. Failing slices from all three get
-promoted into an evaluation set and a new dataset version, closing the loop back to M1.
-*This is the heaviest milestone and splits if it has to.*
+**M4 — the event backbone and its equivalence check.** The four topics above go up on a local
+cluster: `blob.arrived` drives checksum verification and blob registration for the whole corpus,
+`sweep.quality` carries every sensor-check result, `release.cdc` arrives by Debezium, and Kafka
+Connect sinks into the same Iceberg tables M1 writes. Envelope subjects are registered with a
+compatibility policy, and a wire-schema change the table cannot accept fails CI. Consumer groups,
+partition assignment, offset management and DLQ routing are operated rather than described, because
+that is the difference the postings are asking about.
 
-**M5 — streaming ingest and the equivalence check.** Kafka replays the same logs at their recorded
-timestamps, one producer per sensor stream. Rates are Argoverse 2's — nine cameras at 20 fps, the
-merged LiDAR sweep at 10 Hz — which are capture rates rather than a promise that every interval is
-exactly `1/Hz`, and which M1 has already checked against the data. The arrival model is stated and
-seeded, and an order-preserving control run says how much of the outcome the disorder is responsible
-for. Kafka carries envelopes — `uri`, `checksum`, `schema_version`, `start/end_ts` — never sensor
-payloads; the schema and the target table are M1's, unchanged. Duplicate events are injected and
-consumers are killed mid-stream to make the sink defend the handover between Kafka offset and
-Iceberg commit.
+Then the same logs are replayed on `replay.sensor` at their recorded timestamps, one producer per
+sensor stream. Rates are Argoverse 2's — nine cameras at 20 fps, the merged LiDAR sweep at 10 Hz —
+which are capture rates rather than a promise that every interval is exactly `1/Hz`, and which M1
+has already checked against the data. The arrival model is stated and seeded, and an
+order-preserving control run says how much of the outcome the disorder is responsible for. Duplicate
+events are injected and consumers are killed mid-stream to make the sink defend the handover between
+Kafka offset and Iceberg commit.
 
 The claim is one line and deliberately narrow: **the released streaming table equals the released
 batch table over the same logs, row for row and duplicate for duplicate.** Set comparison would not
@@ -296,6 +334,17 @@ duplicates. The guarantee claimed here is release-level equivalence under inject
 forced restarts, scoped to the local configuration. Exactly-once as a property of the delivery path
 is a larger claim — it needs the intermediate states and the external effects — and this milestone
 does not make it.
+
+**M5 — external ground truth.** Three outside opinions on three different claims.
+*Map change:* TbV's labelled HD-map discrepancies score the calibration-residual check against an
+answer key, which is the only way the sensor-level gates become a measurement rather than an
+assertion. *Scenario mining:* RefAV's 10,000 natural-language queries over Argoverse 2 logs,
+answered twice — once by compiling queries to predicates over the `track` table in Trino, once by
+OpenCLIP embeddings over Lance — with both scored by HOTA-Temporal on EvalAI challenge 2469 rather
+than by a query set of our own. *Contract:* nuScenes through the same schema and the same gate,
+because one dataset cannot tell a contract from a parser. Failing slices from all three arrive on
+`sweep.quality` and are promoted into an evaluation set and a new dataset version, closing the loop
+back to M1. *This is the heaviest milestone and splits if it has to.*
 
 ## Measurement rules
 
@@ -316,7 +365,7 @@ Fixed before any measurement, because these are what make a later number mean so
   late-arrival policy fixed before the run, with duplicate injection and forced consumer restarts
   inside it. It says the released tables agree. It does not say every event took effect exactly
   once, and quoting a delivery-guarantee setting out of a config file says less than either.
-- **`freshness` is a stream metric and waits for M5.** Publication latency is a different number and
+- **`freshness` is a stream metric and waits for M4.** Publication latency is a different number and
   is measurable from M3. Stream freshness is *snapshot-queryable time − emit time*, labelled a
   replayed event-time workload with its replay speed stated, and reported next to producer lag,
   since `queryable − emit` hides a producer that emitted late against its own schedule.
@@ -328,7 +377,8 @@ Fixed before any measurement, because these are what make a later number mean so
   *referencing* 900 GB of blobs is not 0.9 TB of processing.
 - **A gate that cannot be shown to fail has not been shown to run.** Disabling one must turn its
   test red. A check that cannot tell "did not fire" from "passed" is worse than none, because it
-  manufactures confidence.
+  manufactures confidence. The schema-compatibility gate is held to this too: a wire schema the
+  table cannot accept is committed on a branch, and CI going green is the bug.
 - **Estimates are labelled as estimates.** A number off a stopwatch, a number derived by arithmetic
   and a number off a vendor page are marked as which. A result is also scoped to the configuration
   it ran in; a local one does not describe the S3 path until it has been run there.
@@ -374,7 +424,7 @@ terabyte back out to this machine costs roughly a hundred times a month of stori
 processing it in-region costs nothing.
 
 M1, M2, M4 and M5 run entirely locally at no cloud cost. M3 needs a small amount of AWS to prove the
-IaC and deployment path, applied once with its logs and cost recorded and then destroyed. M4's
+IaC and deployment path, applied once with its logs and cost recorded and then destroyed. M5's
 embeddings run on CPU in a couple of hours or on a rented GPU in about ten minutes.
 
 ## Status
