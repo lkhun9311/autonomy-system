@@ -172,6 +172,8 @@ Differences of one or two postings sit inside its noise and nothing here rests o
 | Argo CD | drift — whether what runs is what is in git | M3 | — |
 | Kubernetes | already held; carries the single small cluster run in M3 | M3 | 10/20 |
 | PyTorch dataloader | what actually reaches training, measured rather than assumed | M3 | — |
+| Prometheus · Grafana | gate evaluation counters, data SLIs and table health as time series; red when a gate is disabled | M1, M3 | — |
+| Loki · OpenTelemetry | structured logs keyed by release, collected through the standard instrumentation path rather than a bespoke one | M3 | — |
 | Kafka | the ingest control plane — four topics partitioned by `log_id`, consumer groups, offsets as resumability, DLQ into quarantine | M4 | 14/20 |
 | Schema Registry | Avro envelope subjects with a stated compatibility policy, tested against the Iceberg table schema | M4 | — |
 | Kafka Connect | the Iceberg sink, and the connector/offset/snapshot operation the postings ask about by name | M4 | — |
@@ -243,6 +245,46 @@ whether a LiDAR had a dead laser that afternoon. These checks live in M1 and eac
 - **calibration residual** — LiDAR ground returns against the HD map's 30 cm ground-height raster.
   This is the check TbV turns from an assertion into a measurement, because there the answer is
   known.
+
+### Observability is how the gate rule is enforced at runtime
+
+"A gate that cannot be shown to fail has not been shown to run" is a CI rule, and CI only sees the
+gates it was asked about. At runtime the same failure comes back wearing different clothes: the gate
+did not fire, nothing went red, and the release shipped. So every gate emits four counters rather
+than a boolean, and the fourth is the one that matters:
+
+```
+gate_evaluated_total{gate, dataset, release}
+gate_passed_total
+gate_failed_total
+gate_skipped_total      ← alert on this, and on evaluated staying flat while ingest advances
+```
+
+Most systems count passes and failures. Counting *evaluations* and *skips* is what lets a dashboard
+distinguish "the data was clean" from "nobody looked", which is the same distinction the whole
+project is built on.
+
+Data signals sit in the same place as machine signals, because on this platform they are the
+interesting ones: freshness p50/p95 beside producer lag, completeness per release, quarantine depth
+by reason, the `sweep_stat` distributions, blob orphan and checksum-mismatch counts, consumer lag
+per partition, DLQ depth, schema-compatibility outcomes, and the Iceberg table-health numbers —
+snapshot count, small-file count, orphan files — that a lakehouse quietly rots without.
+
+**Prometheus, Loki, Grafana and Alertmanager, instrumented through OpenTelemetry. Not ELK**, for two
+reasons. The signal here is time series and structured events keyed by `release_id`, `log_id` and
+`snapshot_id`, not full-text search over unstructured logs, which is Elasticsearch's strength and
+its cost. And more specifically: **M2 measures the storage path, and Elasticsearch would compete for
+the disk being measured.** Loki indexes labels rather than log content and is roughly an order of
+magnitude lighter for this. Every benchmark run records what else was running on the machine.
+
+Stderr is never discarded. A failure whose cause was routed to `/dev/null` cannot be diagnosed, and
+a check that silently produced nothing is indistinguishable from one that passed — the same bug in a
+different layer.
+
+**The dashboard is not a deliverable.** A screenshot of a green board proves nothing. What counts is
+a board that goes red when a gate is disabled and green again when it is restored, which is the same
+evidence the CI rule demands, taken at runtime. The instrumentation contract is defined in M1 where
+the gates are born, the stack is stood up in M3 beside Airflow, and M4 adds the streaming signals.
 
 ### The event backbone is not a demonstration
 
@@ -382,6 +424,10 @@ Fixed before any measurement, because these are what make a later number mean so
 - **Estimates are labelled as estimates.** A number off a stopwatch, a number derived by arithmetic
   and a number off a vendor page are marked as which. A result is also scoped to the configuration
   it ran in; a local one does not describe the S3 path until it has been run there.
+- **A benchmark run records what else was running.** The observability stack shares this machine
+  with the thing it observes, and M2 measures a disk that Prometheus and Loki also write to. Every
+  storage result carries the co-tenants of its run, and a result taken with an unrecorded background
+  load is a result that cannot be repeated.
 - **Negative results stay.** A run that fails its pre-registered checks is published as one.
 
 ## Where this runs
