@@ -8,94 +8,195 @@ dataset, corruption and gaps cannot pass silently, and a failing slice can be fo
 into the next dataset version. Close all three and it is a platform. Close only the first and it is
 an ETL demo.
 
+## How this is judged
+
+Every number a platform reports about itself is a number it also defined. That is the failure this
+project is built against, so three of its results are computed by someone else.
+
+| Instrument | What it scores | Where |
+|---|---|---|
+| **MLPerf Storage v3.0** | how fast the storage path feeds training | M2 |
+| **Croissant 1.1** | whether release metadata is a standard, not an invention | M2 |
+| **RefAV · EvalAI 2469** | whether scenario retrieval is right, not merely self-consistent | M4 |
+
+MLPerf Storage is the primary one, because it measures this job. It emulates accelerators with
+sleep timers and reads real data through PyTorch at the intensity of a real training run, so it
+needs no GPU: the arithmetic is skipped and the whole path from storage through client memory is
+not. Two of its workloads are this corpus almost exactly — `RetinaNet` is millions of small random
+reads, `3D U-Net` is large sequential reads — and its **open division** admits alternative data
+formats and access methods, which is where Iceberg-plus-external-blobs meets Lance on a workload
+neither of them chose.
+
+Running the suite and reporting against the published v3.0 results is what M2 commits to. A
+reviewed submission to MLCommons is a separate process with its own cycle and is a stretch goal,
+recorded here as one so that the two are never conflated later.
+
 ## Architecture
 
 ```
-  source                  nuScenes — JSON metadata + camera / LiDAR / radar blobs, local disk
-                          │
-                          ├──────────────────────────────┐
-                          │                              │
-  ingest               M1 batch path                  M5 replay path
-                          PySpark normalise              one producer per sensor stream
-                          one scene commit               stated + seeded arrival model
-                          quality gate ─▶ quarantine     Kafka — envelopes only
-                          │                              streaming sink
-                          │                              Kafka offset ↔ Iceberg commit
-                          │                              │
-                          ├──────────────────────────────┘
-                          │
-  store                   Iceberg — one schema, one set of tables
-                          scene · sample · sample_data · blob_ref
-                          ├──────────────────────────────┐
-                          │                              │
-                          release pin                    blob store
-                          snapshot ids · blob hashes     content-addressed · immutable
-                          transform + policy version     checksum · orphan sweep
-                          │
-                          ├────────────────┬────────────────┬──────────────────┐
-  consumers            M1 Trino         M2 dataloader    M3 OpenCLIP        M4 corner cases
-                          SQL, time        PyTorch,         embeddings,        skew · blackout ·
-                          travel, and      what reaches     text / image →     sparse LiDAR →
-                          the M5 diff      training         time ranges        new dataset
-                                                                               version → M1
+  source            Argoverse 2 Sensor · Map Change (TbV) · nuScenes         published 3D tracks
+                    raw logs + blobs, local NVMe                             external input
+                        │                              │                             │
+                        ├──────────────────────────────┤                             │
+                        │                              │                             │
+  ingest           M1 batch path                  M5 replay path                     │
+                      PySpark normalise              one producer per sensor         │
+                      one log commit                 stated + seeded arrival         │
+                      sensor-level gates             Kafka envelopes only            │
+                      │        └─▶ quarantine        offset ↔ commit                 │
+                      │                              │                               │
+                      ├──────────────────────────────┘                               │
+                      │                                                              │
+  store           Iceberg — one schema, one set of tables  ◀─────────────────────────┘
+                  log · sample · sensor_data · blob_ref · sweep_stat · track · event
+                      ├──────────────────────────────┬───────────────────────────┐
+                      │                              │                           │
+                  release pin                    blob store                  Lance table
+                  snapshot ids · blob hashes     content-addressed           embeddings and
+                  transform + policy version     checksum · orphan sweep     random access
+                  Croissant 1.1 · PROV-O                                          │
+                      │                                                           │
+  measure           ┌─┴──────────────────────┐                                    │
+                 M2 MLPerf Storage v3.0       M2 format comparison ◀──────────────┘
+                    RetinaNet · 3D U-Net         open division: Iceberg + blobs
+                    VectorDB · checkpoint        against Lance, same workload
+                      │                              │
+  prove             └──────────────┬───────────────┘
+                                   │
+                 M4 TbV map change            M4 RefAV → EvalAI 2469
+                    LiDAR × camera × HD map      HOTA-Temporal
+                    labelled discrepancies       baseline 50.1 · winner 53.4
+                      │                              │
+  serve          M3 PyTorch dataloader        M4 corner case → new dataset version → back to M1
 ```
 
-Two ingest paths, one schema, one set of tables. **M2** wraps the batch path in Airflow — backfill
-→ gate → publish, repaired idempotently — and proves one deployment path on S3. **M5**'s claim is
-the join at the centre: the released streaming table equals the released batch table over the same
-scenes. What that check does and does not establish is stated in M5 rather than left implied.
+```
+  developer          GitHub                             AWS  ap-northeast-2
+  ─────────          ───────────────────────────        ──────────────────────────────────────
 
-## Skillset
+  feat/*              Actions · CI   (on PR)             GitHub OIDC provider
+    │                 ├ ruff · pytest                      │   no long-lived access keys
+    ▼                 ├ data contract tests                ▼
+   dev ──────────────▶├ quality-rule tests               IAM role  gha-plan   read + plan
+    │                 ├ terraform fmt · validate         IAM role  gha-apply  main branch only
+    │                 └ terraform plan → PR comment        │
+    │                        │                             ▼
+    ▼                        │                           S3    raw-slice · warehouse · artifacts
+   main ─────────────▶ Actions · CD  (on merge)          Glue or Nessie   Iceberg REST catalog
+                       ├ build images → ECR              ECR   spark · airflow · trino
+                       ├ terraform apply                   │
+                       └ bump image tag in deploy/          ▼
+                              │                           EKS   one small node group
+                       deploy/  ← git is desired state      ├ Spark on K8s  ─┐
+                              │                             ├ Airflow        ├ IRSA → S3
+                       Argo CD ─────── sync ───────────────▶└ Trino         ─┘
+                              ▲                                 no node keys, no secrets in env
+                              └ drift detection
+                                what runs == what is in git
 
-| Technology | What it does here | Milestone | Postings † |
+  local only          Kafka · MinIO · single-node Trino · the whole corpus on NVMe
+  on AWS              one slice · terraform plan on every PR · apply once, in M3
+```
+
+The branch flow is the permission boundary: a pull request can only assume a role that plans, and
+apply opens on `main` alone. Argo CD is here for drift rather than for deployment — whether what is
+running is what is in git is a question a system should answer, not a person.
+
+## The substrate
+
+Argoverse 2 is open autonomous-driving data and HD maps from six U.S. cities, released by Argo AI
+under CC BY-NC-SA 4.0. One name covers four datasets, and they are taken in the order of the
+*problem* each one adds rather than the volume it brings.
+
+| Dataset | On disk | What it adds that the others do not | Phase |
+|---|---:|---|---|
+| **Sensor** | ~1 TB | the multimodal blob contract; 1,000 logs, 9 cameras at 20 fps, two 32-beam LiDARs at 10 Hz merged into one sweep, 30-class cuboids at 10 Hz | **1** |
+| **Map Change (TbV)** | 922 GB | **reference drift with ground truth** — 1,043 logs, 559,440 sweeps, 7,837,614 images, and labelled HD-map discrepancies | **2** |
+| Motion Forecasting | 58 GB | row cardinality without blob volume — 250,000 scenarios | 3 |
+| Lidar | not published | volume and unlabelled data — 20,000 thirty-second sequences. Derived from TbV's ratio at roughly 1.5 TB, which is an estimate and is measured before it is committed to | if needed |
+
+Tabular data is Apache Feather throughout: sweeps, poses, calibration, annotations. A sweep carries
+`x`, `y`, `z`, `intensity`, `laser_number` and `offset_ns`, and the last two are what make
+sensor-level quality checkable rather than assertable.
+
+**Map Change is the one this project needs most and the one portfolios ignore.** Its paper is
+*Trust, but Verify: Cross-Modality Fusion for HD Map Change Detection* — the map is wrong on
+purpose, and finding out requires putting LiDAR, camera and map into the same frame. For a platform
+whose claim is that corruption cannot pass silently, that is a quality problem with an answer key,
+which is rarer than a dataset.
+
+### What nuScenes is for
+
+It is not a second pile of data. It is the falsification test for M1's central claim.
+
+M1 says it builds a *normalisation contract*. One dataset cannot distinguish a contract from a
+parser. nuScenes differs on every axis that matters, so passing both through one schema and one
+gate is the evidence:
+
+| | Argoverse 2 Sensor | nuScenes |
+|---|---|---|
+| cameras | 9 at 20 fps | 6 at 12 Hz |
+| LiDAR | 2 × 32-beam at 10 Hz, merged | 1 × 32-beam at 20 Hz |
+| radar | none | 5 at 13 Hz |
+| annotation | 30 classes at 10 Hz | 23 classes at 2 Hz keyframes |
+| tabular format | Apache Feather | JSON |
+| log duration | 15 s | 20 s |
+
+An MCAP/rosbag2 or LeRobot adapter is the same socket, used a third time, and is what connects this
+to the robotics postings that ask for pipelines standardised across teleoperation and simulation
+data rather than across driving logs.
+
+## Why these datasets and not others
+
+Chosen from the frequency of requirements across 20 Korean data-platform postings collected in
+September 2026. The list, the collection date and the coding rules live outside this repository per
+the documentation note in `CONTRIBUTING.md`, so **no reader can recompute the column** — treat it as
+an unverified personal survey explaining how the shortlist was drawn, not as evidence for it.
+Differences of one or two postings sit inside its noise and nothing here rests on them.
+
+| Technology | What it does here | Milestone | Postings |
 |---|---|---|---:|
-| PySpark | nuScenes → canonical scene commit; the batch path the replay path is later checked against | M1 | 18/20 |
-| Python | the language everything above the SQL layer is written in | M1 | 16/20 |
-| Iceberg | snapshot atomicity, schema evolution and time travel under both ingest paths | M1 | 4/20 |
-| SQL / data modelling | the sensor · sample · blob · provenance · release model itself | M1 | 10/20 |
-| Trino | SQL and time travel over the canonical tables, and the row-level diff in M5 | M1, M5 | 5/20 |
-| Airflow | backfill → quality gate → publish, with an injected failure repaired idempotently | M2 | 18/20 |
-| Terraform · S3 · IRSA | one deployment and permission path proved off the laptop, not performance | M2 | — |
-| Kubernetes | already held; carries the single small cluster run in M2 | M2 | 10/20 |
-| PyTorch dataloader | what actually reaches training, measured rather than assumed | M2 | — |
-| OpenCLIP + FAISS | segment embeddings; text and image queries returning time ranges | M3 | — |
-| Kafka | replayed event-time ingest of the same scenes into the same tables | M5 | 14/20 |
+| PySpark | Feather and JSON → one canonical log commit; the batch path the replay path is checked against | M1 | 18/20 |
+| Python | everything above the SQL layer | M1 | 16/20 |
+| Iceberg | snapshot atomicity, schema evolution, time travel under both ingest paths | M1 | 4/20 |
+| SQL / data modelling | the sensor · sample · blob · sweep · track · release model itself | M1 | 10/20 |
+| Trino | SQL and time travel over the canonical tables; the predicate side of scenario mining; the row-level diff in M5 | M1, M4, M5 | 5/20 |
+| Lance | embeddings and random access, measured against Iceberg-plus-blobs on the MLPerf workload | M2 | — |
+| Airflow | backfill → quality gate → publish, with an injected failure repaired idempotently | M3 | 18/20 |
+| Terraform · S3 · IRSA | one deployment and permission path proved off the laptop — not performance | M3 | — |
+| GitHub Actions | contract and quality-rule tests, plan on every PR, apply only from `main` | M3 | — |
+| Argo CD | drift — whether what runs is what is in git | M3 | — |
+| Kubernetes | already held; carries the single small cluster run in M3 | M3 | 10/20 |
+| PyTorch dataloader | what actually reaches training, measured rather than assumed | M3 | — |
+| OpenCLIP | segment embeddings; the vector side of scenario mining | M4 | — |
+| Kafka | replayed event-time ingest of the same logs into the same tables | M5 | 14/20 |
 | MongoDB | **not used** — one posting in twenty, and there as an example rather than a requirement | — | 1/20 |
-
-† Frequency across 20 Korean data-platform postings collected in September 2026. The list, the
-collection date and the coding rules live outside this repository, per the documentation note in
-`CONTRIBUTING.md`, so **no reader can recompute this column** — treat it as an unverified personal
-survey that explains how the shortlist was drawn, not as evidence for it. Differences of one or two
-postings are inside its noise and nothing here rests on them.
 
 Deliberately excluded: Flink (9/20 is not low, but learning a fourth engine while Spark, Kafka and
 Airflow are all at zero lines means none of them gets deep), managed warehouses (they take `$/TB`
 out of our hands), and dbt (this is a platform, not analytics engineering).
 
-Iceberg rather than Delta — and the honest reason is not the 2-to-1 count in a survey nobody can
-recompute, since one posting either way flips that. It is that one format has to be carried the
-whole way through for the M5 comparison to mean anything, and Iceberg is the one whose catalog and
-Trino path are already reachable here. A head-to-head benchmark was planned and has been dropped:
-the criterion that would have flipped the choice was never written down first, so the result could
-not have changed anything. If the roles being targeted genuinely require Delta, the direct evidence
-is writing the same scene commit against Delta once — a compatibility exercise, not a contest, and
-smaller than a milestone.
+Iceberg rather than Delta, and the honest reason is not a 2-to-1 count in a survey nobody can
+recompute. It is that one format has to be carried the whole way through for the M5 comparison to
+mean anything, and Iceberg is the one whose catalog and Trino path are already reachable here. The
+format question does not disappear — it moves to M2, where Lance meets it on a workload defined by
+MLCommons rather than by the person who picked the winner.
 
 ## The boundary
 
 Getting this wrong in either direction is expensive. Reimplementing snapshots is waste; assuming
-the table format covers blob integrity is a correctness bug.
+the table format covers blob integrity or sensor health is a correctness bug.
 
 | Concern | The table format provides | This project implements |
 |---|---|---|
-| Atomicity | snapshot-level atomic commit | grouping N sensors of one scene into a single domain commit |
+| Atomicity | snapshot-level atomic commit | grouping N sensors of one log into a single domain commit |
 | Versioning | snapshot history, time travel | dataset *release* semantics — approval, deprecation, training eligibility |
-| Schema | schema evolution | nuScenes normalisation, per-sensor field model, compatibility policy |
+| Schema | schema evolution | AV2 and nuScenes normalisation, per-sensor field model, compatibility policy |
 | Slicing | SQL predicates over rows | a slice preserving a consistent sensor set, calibration version, missing-frame policy, blob existence |
 | Catalog | table identifier → metadata location | the domain catalog: sensor, sample, blob, provenance, release state |
-| Quality | — | referential integrity, blob existence/size/checksum, sensor coverage, timestamp contracts |
+| Quality | — | referential integrity, blob existence/size/checksum, and the sensor-level checks below |
 | Orchestration | — | retry, idempotency, backfill, repair, gating, alerting |
-| Blob lifecycle | tracks its own data files | external JPEG/`.bin` upload, checksum, orphan detection, retention |
+| Blob lifecycle | tracks its own data files | external JPEG/Feather upload, checksum, orphan detection, retention |
 
 **The blob row is the load-bearing decision.** Sensor payloads do not go into a `binary` column.
 Metadata rows carry `blob_uri`, `byte_size` and `checksum`; payloads live in object storage. Said
@@ -103,89 +204,98 @@ plainly: **a snapshot does not protect the contents of the object `blob_uri` poi
 or delete that object and the table is silently wrong. Content-addressed keys, immutable object
 policy, checksum verification and orphan reconciliation are ours to build.
 
-**What a release pins is the other one.** "One scene commit" and "dataset release" are the two
-phrases this project promises reproducibility with, and neither means anything until its boundary is
-written down. A release names the snapshot id of every table it spans, the content hash of every
-blob it references, and the version of the transform and the quality policy that produced it;
-approval publishes those together or publishes nothing. Leave that undefined and a quality gate can
-pass, a referenced blob can be deleted before publication, and a dataloader can read a different
-snapshot per sensor — while the row-level check in M5 still comes back equal and the training data
-still is not reproducible.
+**What a release pins is the other one.** A release names the snapshot id of every table it spans,
+the content hash of every blob it references, and the version of the transform and the quality
+policy that produced it; approval publishes those together or publishes nothing. Leave that
+undefined and a gate can pass, a referenced blob can be deleted before publication, and a dataloader
+can read a different snapshot per sensor — while a row-level check still comes back equal and the
+training data still is not reproducible. The pin is emitted as **Croissant 1.1**, whose PROV-O
+provenance model already says what this project would otherwise have invented.
+
+### Sensor-level quality is not metadata quality
+
+Referential integrity and checksums say the rows point at objects that exist. They say nothing about
+whether a LiDAR had a dead laser that afternoon. These checks live in M1 and each writes a row to
+`sweep_stat` rather than a boolean:
+
+- **per-laser return counts** — `laser_number` spans 64 lasers across the two units; a laser whose
+  return count collapses against its own history is degraded hardware, not a bad log.
+- **sweep point count and range distribution** — sparse sweeps, rain and occlusion look different
+  from each other and from a dropped sensor.
+- **intra-sweep timing** — `offset_ns` must span one 10 Hz revolution and advance monotonically per
+  laser; violations are a sync fault the row count cannot see.
+- **cross-sensor skew** — every sweep against the nearest frame of each of the nine cameras, kept as
+  a distribution per camera rather than a single mean.
+- **ego-pose continuity** — gaps and jumps in the 6-DOF pose stream break motion compensation
+  downstream of anything that consumes them.
+- **calibration residual** — LiDAR ground returns against the HD map's 30 cm ground-height raster.
+  This is the check TbV turns from an assertion into a measurement, because there the answer is
+  known.
 
 ## Milestones
 
 Ordered by dependency where one exists and by priority where it does not, and the two are labelled
-rather than blurred. Throughput measured before reconciliation is proven measures nothing, and
-embeddings over a corpus that cannot be searched cannot be evaluated — those are dependencies. M5's
-only hard dependency is M1. It is last by priority: the reference has to exist before the comparison
-is worth running, and it is the piece the rest of the platform does not need.
+rather than blurred. M2 depends on M1 and nothing else. M4's two instruments depend on M1, and its
+map-change work depends on the sensor-level checks in M1 having somewhere to write. M5 depends only
+on M1 and is last by priority.
 
-The streaming layer being last is not because the dataset is static. Replaying nuScenes at recorded
-timestamps is a genuine event-time workload once each sensor stream is its own producer, because the
-consumer's merged view is then out of order by construction. What it is not is free evidence:
-nuScenes records sensor timestamps, not arrival times, so the arrival model is synthetic and M5
-states its partitioning, keys, delay distribution and seed and runs an order-preserving control
-beside it. Claiming that differing sensor rates by themselves produce out-of-order arrival would be
-false — merge-sort every sensor into one partition and the order never inverts.
-
-What M5 buys is a reference to check against. **The batch pipeline is the reference for the
-streaming one** — with the caveat that both share the normalisation code, so agreement between them
-cannot detect a bug they hold in common. M1 therefore produces the independent half, and agreement
-with the batch table is the second check rather than the first.
-
-**M1 — canonical lakehouse.** PySpark normalises `scene`/`sample`/`sample_data` into one scene
-commit; the blob contract and the release pin above are established; clock skew, missing sensors,
-duplicates and out-of-order frames are detected; failures land in a quarantine table rather than in
-the release. Two artefacts are built here for later use: per-sensor event counts derived from the
-source metadata *without* going through the transform, and a hand-checked fixture of a few scenes.
-A local single-node Trino reads two fixed snapshots and returns their expected rows — an
-interoperability and time-travel check, not a second implementation; if it starts to need catalog or
-storage configuration beyond that, it moves to M2.
+**M1 — canonical lakehouse and sensor-level quality.** PySpark normalises Argoverse 2 Sensor into
+one log commit; the blob contract and the release pin are established; the sensor-level checks above
+run and land in `sweep_stat`; failures land in a quarantine table rather than in the release. Two
+artefacts are built here for later use: per-sensor event counts derived from the source metadata
+*without* going through the transform, and a hand-checked fixture of a few logs. A local
+single-node Trino reads two fixed snapshots and returns their expected rows — an interoperability
+and time-travel check, not a second implementation.
 *Excluded here: throughput headlines, S3, clusters, streaming.*
 
-**M2 — reproducible training supply.** Airflow runs backfill → quality gate → publish, with an
-injected task failure repaired idempotently and partial backfill by scene, sensor, date or quality
-slice. S3, IAM/IRSA and `terraform plan` in CI, plus one small cluster run that proves deployment
-and permissions — not performance. A PyTorch dataloader measures what actually reaches training,
-and publication latency — input ready to release published — is first measurable here.
+**M2 — the measured data path.** MLPerf Storage v3.0 runs against this corpus on this hardware:
+`RetinaNet` for the small-random-read path, `3D U-Net` for the large-sequential one, `VectorDB` for
+the embedding index, and checkpointing for the write path. The open division carries the format
+comparison — Iceberg with external blobs against Lance — on a workload neither of them designed.
+Every release emits Croissant 1.1 metadata with PROV-O provenance and passes the validator.
+*A reviewed MLCommons submission is a stretch goal and is recorded as one.*
 
-**M3 — temporal search and evaluation.** OpenCLIP produces segment embeddings keyed by
-`scene_id · camera · start_ts · end_ts · embedding_version`; text and image queries return time
-ranges, not files; Recall@K and latency say whether the search is right rather than whether it
-exists. Query set and ground truth are fixed *before* the embeddings are built.
+**M3 — reproducible supply.** Airflow runs backfill → quality gate → publish, with an injected task
+failure repaired idempotently and partial backfill by log, sensor, date or quality slice. Terraform,
+S3, IAM/IRSA and `terraform plan` in CI, Argo CD reconciling `deploy/`, and one small cluster run
+that proves deployment and permissions — not performance. A PyTorch dataloader measures what
+actually reaches training; publication latency is first measurable here.
 
-**M4 — failure mining and promotion.** Three to five corner-case queries (excessive clock skew,
-camera blackout, sparse LiDAR, hard braking, annotation disagreement) produce slices that get
-promoted into an evaluation set and a new dataset version, closing the loop back to M1. Most of
-these are SQL quality queries and do not depend on M3; the ones that need embeddings say so. An
-optional MCAP/rosbag2 adapter covers the interchange concept that US robotics postings ask for by
-description rather than by product name.
+**M4 — external ground truth.** Three things, each an outside opinion on a different claim.
+*Map change:* TbV's labelled HD-map discrepancies score the calibration-residual check against an
+answer key, which is the only way the sensor-level gates become a measurement. *Scenario mining:*
+RefAV's 10,000 natural-language queries over Argoverse 2 logs, answered twice — once by compiling
+queries to predicates over the `track` table in Trino, once by OpenCLIP embeddings over Lance — with
+both scored by HOTA-Temporal on EvalAI challenge 2469 rather than by a query set of our own.
+*Contract:* nuScenes through the same schema and the same gate. Failing slices from all three get
+promoted into an evaluation set and a new dataset version, closing the loop back to M1.
+*This is the heaviest milestone and splits if it has to.*
 
-**M5 — streaming ingest and the equivalence check.** Kafka replays the same scenes at their
-recorded timestamps, one producer per sensor stream, at the rates the nuScenes specification states
-— six cameras at 12 Hz, `LIDAR_TOP` at 20 Hz, five radars at 13 Hz, keyframes at 2 Hz. Those are
-capture rates, not a promise that every interval is exactly `1/Hz`, and M1 has already checked them
-against the data. The arrival model is stated and seeded, and an order-preserving control run says
-how much of the outcome the disorder is responsible for. Kafka carries envelopes — `uri`,
-`checksum`, `schema_version`, `start/end_ts` — never sensor payloads; the schema and the target
-table are M1's, unchanged. Duplicate events are injected and consumers are killed mid-stream to make
-the sink defend the handover between Kafka offset and Iceberg commit.
+**M5 — streaming ingest and the equivalence check.** Kafka replays the same logs at their recorded
+timestamps, one producer per sensor stream. Rates are Argoverse 2's — nine cameras at 20 fps, the
+merged LiDAR sweep at 10 Hz — which are capture rates rather than a promise that every interval is
+exactly `1/Hz`, and which M1 has already checked against the data. The arrival model is stated and
+seeded, and an order-preserving control run says how much of the outcome the disorder is responsible
+for. Kafka carries envelopes — `uri`, `checksum`, `schema_version`, `start/end_ts` — never sensor
+payloads; the schema and the target table are M1's, unchanged. Duplicate events are injected and
+consumers are killed mid-stream to make the sink defend the handover between Kafka offset and
+Iceberg commit.
 
 The claim is one line and deliberately narrow: **the released streaming table equals the released
-batch table over the same scenes, row for row and duplicate for duplicate.** Set comparison would
-not do — it calls the batch table's `[a]` equal to a streaming table's `[a, a]`. The comparison is
-fixed before the run: which columns are in scope (`ingested_at` and run identifiers are not), which
-input range, what happens to an event arriving past the watermark on one path but not the other, and
-what condition means the stream has finished emitting. Trino runs the diff.
+batch table over the same logs, row for row and duplicate for duplicate.** Set comparison would not
+do — it calls the batch table's `[a]` equal to a streaming table's `[a, a]`. The comparison is fixed
+before the run: which columns are in scope (`ingested_at` and run identifiers are not), which input
+range, what happens to an event arriving past the watermark on one path but not the other, and what
+condition means the stream has finished emitting. Trino runs the diff.
 
 What the check does *not* establish is published with it. Equality of the released tables is
 evidence about the final state, not about every state the pipeline passed through: a sink that
 commits to Iceberg, dies before recording its checkpoint, re-appends on restart and deduplicates at
 release time yields an equal final table while any reader of the intermediate snapshot saw
-duplicates. The guarantee claimed here is therefore release-level equivalence under injected
-duplicates and forced restarts, scoped to the local configuration below. Exactly-once as a property
-of the delivery path is a larger claim — it needs the intermediate states and the external effects —
-and this milestone does not make it.
+duplicates. The guarantee claimed here is release-level equivalence under injected duplicates and
+forced restarts, scoped to the local configuration. Exactly-once as a property of the delivery path
+is a larger claim — it needs the intermediate states and the external effects — and this milestone
+does not make it.
 
 ## Measurement rules
 
@@ -195,25 +305,27 @@ Fixed before any measurement, because these are what make a later number mean so
   Fault-detection recall is a different number on a different line; the two are never merged, and
   recall is reported per fault type rather than averaged.
 - **Agreement between two paths that share code is the second check, not the first.** If the batch
-  and streaming paths share a normalisation that drops a radar channel, they agree on the wrong
-  answer. The first check is a value derived without the transform — the M1 per-sensor counts and
-  the hand-checked fixture. `completeness` takes its denominator from those, never from the output.
+  and streaming paths share a normalisation that drops a laser, they agree on the wrong answer. The
+  first check is a value derived without the transform — the M1 per-sensor counts and the
+  hand-checked fixture. `completeness` takes its denominator from those, never from the output.
+- **A number computed here is labelled as such.** The three external instruments are named with
+  their version, their division and the date they were run, and their results are never averaged
+  with internal ones. An MLPerf Storage result run locally is not a submitted result and says so.
 - **Release equivalence is a comparison; exactly-once is a larger claim.** Equivalence is reported
   as row-level equality with duplicate multiplicity preserved, over a column set, input range and
   late-arrival policy fixed before the run, with duplicate injection and forced consumer restarts
   inside it. It says the released tables agree. It does not say every event took effect exactly
   once, and quoting a delivery-guarantee setting out of a config file says less than either.
 - **`freshness` is a stream metric and waits for M5.** Publication latency is a different number and
-  is measurable from M2. Stream freshness is *snapshot-queryable time − emit time*, labelled a
+  is measurable from M3. Stream freshness is *snapshot-queryable time − emit time*, labelled a
   replayed event-time workload with its replay speed stated, and reported next to producer lag,
-  since `queryable − emit` hides a producer that emitted late against its own schedule. Measured
-  against the original sensor timestamp it would only measure how old nuScenes is; presented as
-  production freshness it would be a false claim.
-- **`Recall@K` needs its ground truth first.** Choosing the correct answers after seeing the search
-  results is not evaluation, it is justification.
+  since `queryable − emit` hides a producer that emitted late against its own schedule.
+- **Retrieval accuracy is EvalAI's number, not ours.** HOTA-Temporal, HOTA-Track, Timestamp BA and
+  Log BA are reported as returned, beside the published baseline of 50.1 and challenge best of 53.4.
+  A query set of our own scoring itself would be justification rather than evaluation.
 - **`$/TB` needs an honest denominator.** Structured bytes, blob bytes read for hashing, bytes
-  written and total corpus referenced are counted separately. Reading 1 GB of JSON while
-  *referencing* 350 GB of blobs is not 0.35 TB of processing.
+  written and total corpus referenced are counted separately. Reading 1 GB of Feather while
+  *referencing* 900 GB of blobs is not 0.9 TB of processing.
 - **A gate that cannot be shown to fail has not been shown to run.** Disabling one must turn its
   test red. A check that cannot tell "did not fire" from "passed" is worse than none, because it
   manufactures confidence.
@@ -224,24 +336,51 @@ Fixed before any measurement, because these are what make a later number mean so
 
 ## Where this runs
 
-Measured on the development machine: 32 cores, 59 GiB RAM, 1.2 TB free, NVMe at 18 GB/s read,
-sha256 at 0.5 GiB/s per core. Those are stopwatch numbers about the hardware. Everything else in
-this section is arithmetic from them, and is an estimate.
+Measured on the development machine: 32 cores, 59 GiB RAM, NVMe at 18 GB/s read, sha256 at
+0.5 GiB/s per core. No local NVIDIA GPU. Those are stopwatch numbers about the hardware; everything
+else in this section is arithmetic from them or from published rates, and is an estimate.
 
-M1, M4 and M5 run entirely locally at no cloud cost. M2 needs a small amount of AWS to prove the IaC
-and deployment path; M3 should embed on CPU in a couple of hours, or in about ten minutes on a
-rented GPU. Source data stays local and only a slice is uploaded — storing the full corpus in object
-storage is estimated at roughly a third of the monthly budget, every month, which is a design
-decision rather than a saving.
+Storage is 2 TB internal with 1.2 TB free, plus a 4 TB NVMe drive added for this work — about 5.2 TB
+of working space. The corpus stays on it:
 
-M5 runs against local storage and a local catalog, so its conclusions are about that configuration.
-Extending them to the S3 path built in M2 would mean running the same duplicate injection and
-restart scenarios there. Until that happens, the streaming result is not a statement about the cloud
-deployment.
+| | On disk |
+|---|---:|
+| Argoverse 2 Sensor | ~1 TB |
+| Argoverse 2 Map Change (TbV) | 922 GB |
+| Argoverse 2 Motion Forecasting | 58 GB |
+| nuScenes | ~350 GB |
+| Iceberg warehouse, Lance tables, derived releases | ~0.5–1 TB |
+| **committed total** | **~3 TB** |
+
+Argoverse 2 Lidar would add roughly another 1.5 TB by the estimate above and is not committed.
+
+**The corpus is local on purpose, and MLPerf Storage is why.** That benchmark measures the path from
+storage through client memory; moving the corpus to object storage would remove the thing being
+measured. A year of 1 TB in S3 Standard costs about what the drive did, and at the end of the year
+the drive is still here.
+
+S3's role is to prove the cloud path — IaC, IRSA, catalog, one slice — not to hold the corpus. Two
+facts decide how archival is done, both of which apply directly to this data:
+
+- **Glacier Deep Archive bills per object**, adding 32 KB of archive index plus 8 KB of
+  Standard-rate metadata to each. TbV alone is 7.84 million images; at 40 KB apiece that is over
+  300 GB of pure overhead.
+- **Lifecycle transitions bill per request.** Moving millions of individual files into Glacier costs
+  more than storing them there.
+
+So archival applies to *derived releases, aggregated into few large objects*, after a milestone
+closes — never to the working set, and never file-by-file. Egress is the other trap: pulling a
+terabyte back out to this machine costs roughly a hundred times a month of storing it, while
+processing it in-region costs nothing.
+
+M1, M2, M4 and M5 run entirely locally at no cloud cost. M3 needs a small amount of AWS to prove the
+IaC and deployment path, applied once with its logs and cost recorded and then destroyed. M4's
+embeddings run on CPU in a couple of hours or on a rented GPU in about ten minutes.
 
 ## Status
 
 Pre-registration stage. Nothing in the system has been measured, because nothing in it has been
-built — the hardware figures above are the exception and are marked as such. When system numbers
-exist they appear here with the baseline, the workload, the hardware, the commit hash and the
-repetition count, or they do not appear at all.
+built — the hardware figures above are the exception and are marked as such. Dataset sizes are
+published specifications except where marked as estimates, and are verified against the actual
+download in M1. When system numbers exist they appear here with the baseline, the workload, the
+hardware, the commit hash and the repetition count, or they do not appear at all.
