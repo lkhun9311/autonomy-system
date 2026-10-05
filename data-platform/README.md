@@ -72,17 +72,19 @@ project is built against, so three of its results are computed by someone else.
 | **Croissant 1.1** | whether release metadata is a standard, not an invention | M2 |
 | **RefAV · EvalAI 2469** | whether scenario retrieval is right, not merely self-consistent | M5 |
 
-MLPerf Storage is the primary one, because it measures this job. It emulates accelerators with
-sleep timers and reads real data through PyTorch at the intensity of a real training run, so it
-needs no GPU: the arithmetic is skipped and the whole path from storage through client memory is
-not. Two of its workloads are this corpus almost exactly — `RetinaNet` is millions of small random
-reads, `3D U-Net` is large sequential reads — and its **open division** admits alternative data
-formats and access methods, which is where Iceberg-plus-external-blobs meets Lance on a workload
-neither of them chose.
+MLPerf Storage is the primary one, because it measures this job. It emulates accelerators and
+reads data through PyTorch at the intensity of a real training run, so it needs no GPU: the
+arithmetic is skipped and the whole path from storage through client memory is not. Its training
+workloads read a dataset the benchmark generates itself, so what it measures is this machine's
+storage path, not this corpus. `RetinaNet` is millions of small random reads and `3D U-Net` is large
+sequential ones — access patterns close to how camera frames and LiDAR sweeps are read in training,
+which is a resemblance, not an identity.
 
-Running the suite and reporting against the published v3.0 results is what M2 commits to. A
-reviewed submission to MLCommons is a separate process with its own cycle and is a stretch goal,
-recorded here as one so that the two are never conflated later.
+M2 runs it in the **closed division**, unmodified, because only closed results share a
+comparability class with the published v3.0 rows; the open division admits only formats its I/O
+layer already knows and forfeits comparability by its own rules. A reviewed submission to MLCommons
+is a separate process with its own cycle and is a stretch goal, recorded here as one so that the two
+are never conflated later.
 
 ## Architecture
 
@@ -115,8 +117,8 @@ recorded here as one so that the two are never conflated later.
                       │                                                           │
   measure           ┌─┴──────────────────────┐                                    │
                  M2 MLPerf Storage v3.0       M2 format comparison ◀──────────────┘
-                    RetinaNet · 3D U-Net         open division: Iceberg + blobs
-                    VectorDB · checkpoint        against Lance, same workload
+                    closed · RetinaNet           pre-registered: Iceberg + blobs
+                    3D U-Net · checkpoint        against Lance, on the AV2 corpus
                       │                              │
   prove             └──────────────┬───────────────┘
                                    │
@@ -218,7 +220,7 @@ Differences of one or two postings sit inside its noise and nothing here rests o
 | Iceberg | snapshot atomicity, schema evolution, time travel under both ingest paths | M1 | 4/20 |
 | SQL / data modelling | the sensor · sample · blob · sweep · track · release model itself | M1 | 10/20 |
 | Trino | SQL and time travel over the canonical tables; the predicate side of scenario mining; the row-level diff in M4 | M1, M4, M5 | 5/20 |
-| Lance | embeddings and random access, measured against Iceberg-plus-blobs on the MLPerf workload | M2 | — |
+| Lance | embeddings and random access, measured against Iceberg-plus-blobs on the Argoverse 2 corpus under a pre-registered method | M2 | — |
 | Airflow | backfill → quality gate → publish, with an injected failure repaired idempotently | M3 | 18/20 |
 | Terraform · S3 · IRSA | one deployment and permission path proved off the laptop — not performance | M3 | — |
 | GitHub Actions | contract and quality-rule tests, plan on every PR, apply only from `main` | M3 | — |
@@ -246,8 +248,9 @@ Adding them deepens the one streaming system instead of starting a second.
 Iceberg rather than Delta, and the honest reason is not a 2-to-1 count in a survey nobody can
 recompute. It is that one format has to be carried the whole way through for the M4 comparison to
 mean anything, and Iceberg is the one whose catalog and Trino path are already reachable here. The
-format question does not disappear — it moves to M2, where Lance meets it on a workload defined by
-MLCommons rather than by the person who picked the winner.
+format question does not disappear — it moves to M2, where Lance meets it on the corpus itself. The
+person who picked the winner still sets those conditions, so the method is registered before the run
+and both configurations are published with the result.
 
 ## The boundary
 
@@ -394,10 +397,12 @@ and time-travel check, not a second implementation. Release state changes go out
 there.
 *Excluded here: throughput headlines, S3, clusters, streaming ingest.*
 
-**M2 — the measured data path.** MLPerf Storage v3.0 runs against this corpus on this hardware:
-`RetinaNet` for the small-random-read path, `3D U-Net` for the large-sequential one, `VectorDB` for
-the embedding index, and checkpointing for the write path. The open division carries the format
-comparison — Iceberg with external blobs against Lance — on a workload neither of them designed.
+**M2 — the measured data path.** MLPerf Storage v3.0 runs in the closed division on this hardware:
+`RetinaNet` for the small-random-read path, `3D U-Net` for the large-sequential one, and
+checkpointing for the write path, each reported beside the published rows of its comparability
+class. Separately, Iceberg with external blobs and Lance are measured against each other on the
+Argoverse 2 corpus — random frame reads and sequential sweep reads through the same PyTorch
+dataloader — with the method, the configurations and the access mix registered before the run.
 Every release emits Croissant 1.1 metadata with PROV-O provenance and passes the validator.
 *A reviewed MLCommons submission is a stretch goal and is recorded as one.*
 
@@ -512,9 +517,9 @@ of working space. The corpus stays on it:
 
 Argoverse 2 Lidar would add roughly another 1.5 TB by the estimate above and is not committed.
 
-**The corpus is local on purpose, and MLPerf Storage is why.** That benchmark measures the path from
-storage through client memory; moving the corpus to object storage would remove the thing being
-measured. A year of 1 TB in S3 Standard costs about what the drive did, and at the end of the year
+**The corpus is local on purpose.** The M2 measurements — MLPerf Storage on this NVMe and the format
+comparison on the corpus itself — measure the path from local storage through client memory; moving
+the corpus to object storage would measure the network instead. A year of 1 TB in S3 Standard costs about what the drive did, and at the end of the year
 the drive is still here.
 
 S3's role is to prove the cloud path — IaC, IRSA, catalog, one slice — not to hold the corpus. Two
