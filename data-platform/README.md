@@ -39,6 +39,8 @@ $ dp dataset load rel_01J8XQ7…
 
 **The refusal is the point.** A platform that quietly returns slightly different data is worse than
 one that stops, because the first kind of failure reaches a model and the second reaches a person.
+The same holds when the loader cannot find out whether a release has since been deprecated: it
+refuses rather than assumes, and only an explicit `--offline` load skips that check.
 
 The three senses of "reproducibly" in the question above are the three guarantees a release makes:
 
