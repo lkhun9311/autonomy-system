@@ -96,7 +96,7 @@ recorded here as one so that the two are never conflated later.
                       PySpark normalise              topics partitioned by log_id    │
                       one log commit                   blob.arrived   ~11 M events   │
                       sensor-level gates               sweep.quality  ~0.7 M         │
-                      │        └─▶ quarantine          release.events Debezium       │
+                      │        └─▶ quarantine          release.events outbox · M1    │
                       │                                replay.sensor  event-time     │
                       │                              Schema Registry · Avro · compat │
                       │                              Kafka Connect ─▶ Iceberg sink   │
@@ -227,10 +227,10 @@ Differences of one or two postings sit inside its noise and nothing here rests o
 | PyTorch dataloader | what actually reaches training, measured rather than assumed | M3 | — |
 | Prometheus · Grafana | gate evaluation counters, data SLIs and table health as time series; red when a gate is disabled | M1, M3 | — |
 | Loki · OpenTelemetry | structured logs keyed by release, collected through the standard instrumentation path rather than a bespoke one | M3 | — |
-| Kafka | the ingest control plane — four topics partitioned by `log_id`, consumer groups, offsets as resumability, DLQ into quarantine | M4 | 14/20 |
+| Kafka | the release control plane from M1 (`release.events`); the ingest control plane from M4 — topics partitioned by `log_id`, consumer groups, offsets as resumability, DLQ into quarantine | M1, M4 | 14/20 |
 | Schema Registry | Avro envelope subjects with a stated compatibility policy, tested against the Iceberg table schema | M4 | — |
 | Kafka Connect | the Iceberg sink, and the connector/offset/snapshot operation the postings ask about by name | M4 | — |
-| Debezium | the Outbox Event Router on the release-state Postgres, so release history is a table rather than a log | M4 | — |
+| Debezium | the Outbox Event Router on the release-state Postgres, so release history is a table rather than a log | M1 | — |
 | OpenCLIP | segment embeddings; the vector side of scenario mining | M5 | — |
 | MongoDB | **not used** — one posting in twenty, and there as an example rather than a requirement | — | 1/20 |
 
@@ -341,17 +341,22 @@ the gates are born, the stack is stood up in M3 beside Airflow, and M4 adds the 
 
 ### The event backbone is not a demonstration
 
-M1's batch path is deliberately free of Kafka, because it is the reference the streaming path is
-later checked against. That is the *only* reason Kafka is absent from M1, and it says nothing about
-how much of the platform runs on events. Four topics do, each partitioned by `log_id` so that
-per-log ordering is a property of the layout rather than a hope:
+M1's *data* path is deliberately free of Kafka, because it is the reference the streaming path is
+later checked against. That is the only reason sensor data does not travel on Kafka in M1, and it
+says nothing about how much of the platform runs on events. The release control plane does from
+M1: every release state change is written with an outbox row in the same transaction and published
+on `release.events`, keyed by `release_id`, so the console and every consumer learn of a state
+change from the event rather than from a poll. Ordering is per partition only, so each event carries
+the release's version and consumers drop anything older than what they hold. The three ingest
+topics follow in M4, each partitioned by `log_id` so that per-log ordering is a property of the
+layout rather than a hope:
 
-| Topic | Volume | The question it exists to answer |
-|---|---:|---|
-| `blob.arrived` | ~11 M | when eleven million objects land, how does the platform know what to process, once each, and resume from where it stopped? |
-| `sweep.quality` | ~0.7 M | how does a failed sensor check become a new dataset version without a human polling a table? |
-| `release.events` | low | is the release state machine's history queryable as data, or only as application logs? |
-| `replay.sensor` | ~0.7 M | does event time hold up when arrival order and event order disagree? |
+| Topic | Key | From | Volume | The question it exists to answer |
+|---|---|---|---:|---|
+| `release.events` | `release_id` | M1 | low | is the release state machine's history queryable as data, or only as application logs? |
+| `blob.arrived` | `log_id` | M4 | ~11 M | when eleven million objects land, how does the platform know what to process, once each, and resume from where it stopped? |
+| `sweep.quality` | `log_id` | M4 | ~0.7 M | how does a failed sensor check become a new dataset version without a human polling a table? |
+| `replay.sensor` | `log_id` | M4 | ~0.7 M | does event time hold up when arrival order and event order disagree? |
 
 Consumer groups supply the parallelism, offsets supply the resumability, and the dead-letter queue
 lands in the quarantine table that already exists — a poison envelope and a failed quality gate
@@ -384,8 +389,10 @@ run and land in `sweep_stat`; failures land in a quarantine table rather than in
 artefacts are built here for later use: per-sensor event counts derived from the source metadata
 *without* going through the transform, and a hand-checked fixture of a few logs. A local
 single-node Trino reads two fixed snapshots and returns their expected rows — an interoperability
-and time-travel check, not a second implementation.
-*Excluded here: throughput headlines, S3, clusters, streaming.*
+and time-travel check, not a second implementation. Release state changes go out on
+`release.events` through the outbox on a single-broker Kafka, and the console follows them from
+there.
+*Excluded here: throughput headlines, S3, clusters, streaming ingest.*
 
 **M2 — the measured data path.** MLPerf Storage v3.0 runs against this corpus on this hardware:
 `RetinaNet` for the small-random-read path, `3D U-Net` for the large-sequential one, `VectorDB` for
@@ -400,10 +407,10 @@ S3, IAM/IRSA and `terraform plan` in CI, Argo CD reconciling `deploy/`, and one 
 that proves deployment and permissions — not performance. A PyTorch dataloader measures what
 actually reaches training; publication latency is first measurable here.
 
-**M4 — the event backbone and its equivalence check.** The four topics above go up on a local
-cluster: `blob.arrived` drives checksum verification and blob registration for the whole corpus,
-`sweep.quality` carries every sensor-check result, `release.events` arrives by Debezium, and Kafka
-Connect sinks into the same Iceberg tables M1 writes. Envelope subjects are registered with a
+**M4 — the event backbone and its equivalence check.** The three ingest topics above go up on a
+local cluster beside the `release.events` topic M1 already runs: `blob.arrived` drives checksum
+verification and blob registration for the whole corpus, `sweep.quality` carries every sensor-check
+result, and Kafka Connect sinks into the same Iceberg tables M1 writes. Envelope subjects are registered with a
 compatibility policy, and a wire-schema change the table cannot accept fails CI. Consumer groups,
 partition assignment, offset management and DLQ routing are operated rather than described, because
 that is the difference the postings are asking about.
