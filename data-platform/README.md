@@ -96,7 +96,7 @@ recorded here as one so that the two are never conflated later.
                       PySpark normalise              topics partitioned by log_id    │
                       one log commit                   blob.arrived   ~11 M events   │
                       sensor-level gates               sweep.quality  ~0.7 M         │
-                      │        └─▶ quarantine          release.cdc    Debezium       │
+                      │        └─▶ quarantine          release.events Debezium       │
                       │                                replay.sensor  event-time     │
                       │                              Schema Registry · Avro · compat │
                       │                              Kafka Connect ─▶ Iceberg sink   │
@@ -230,7 +230,7 @@ Differences of one or two postings sit inside its noise and nothing here rests o
 | Kafka | the ingest control plane — four topics partitioned by `log_id`, consumer groups, offsets as resumability, DLQ into quarantine | M4 | 14/20 |
 | Schema Registry | Avro envelope subjects with a stated compatibility policy, tested against the Iceberg table schema | M4 | — |
 | Kafka Connect | the Iceberg sink, and the connector/offset/snapshot operation the postings ask about by name | M4 | — |
-| Debezium | change data capture from the release-state Postgres, so release history is a table rather than a log | M4 | — |
+| Debezium | the Outbox Event Router on the release-state Postgres, so release history is a table rather than a log | M4 | — |
 | OpenCLIP | segment embeddings; the vector side of scenario mining | M5 | — |
 | MongoDB | **not used** — one posting in twenty, and there as an example rather than a requirement | — | 1/20 |
 
@@ -350,7 +350,7 @@ per-log ordering is a property of the layout rather than a hope:
 |---|---:|---|
 | `blob.arrived` | ~11 M | when eleven million objects land, how does the platform know what to process, once each, and resume from where it stopped? |
 | `sweep.quality` | ~0.7 M | how does a failed sensor check become a new dataset version without a human polling a table? |
-| `release.cdc` | low | is the release state machine's history queryable as data, or only as application logs? |
+| `release.events` | low | is the release state machine's history queryable as data, or only as application logs? |
 | `replay.sensor` | ~0.7 M | does event time hold up when arrival order and event order disagree? |
 
 Consumer groups supply the parallelism, offsets supply the resumability, and the dead-letter queue
@@ -364,7 +364,9 @@ it reaches a topic — and like every gate here, it has to be shown to fail befo
 Nothing about a `binary` column changes: envelopes carry `uri`, `checksum`, `schema_version` and
 `start/end_ts`, never sensor payloads.
 
-Debezium supplies `release.cdc` from the Postgres that Airflow needs anyway, which is what turns
+Debezium's Outbox Event Router publishes `release.events` from the Postgres that Airflow needs
+anyway — domain events rather than raw row changes, which is why the topic is not named `cdc` —
+and that is what turns
 the draft → gated → approved → deprecated state machine from application state into a table with a
 history. Kafka Connect runs the Iceberg sink. Neither is a fourth engine; both are the components
 the postings name.
@@ -400,7 +402,7 @@ actually reaches training; publication latency is first measurable here.
 
 **M4 — the event backbone and its equivalence check.** The four topics above go up on a local
 cluster: `blob.arrived` drives checksum verification and blob registration for the whole corpus,
-`sweep.quality` carries every sensor-check result, `release.cdc` arrives by Debezium, and Kafka
+`sweep.quality` carries every sensor-check result, `release.events` arrives by Debezium, and Kafka
 Connect sinks into the same Iceberg tables M1 writes. Envelope subjects are registered with a
 compatibility policy, and a wire-schema change the table cannot accept fails CI. Consumer groups,
 partition assignment, offset management and DLQ routing are operated rather than described, because
