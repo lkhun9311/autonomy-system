@@ -3,6 +3,7 @@ import shutil
 import subprocess
 import uuid
 from collections import Counter
+from contextlib import contextmanager
 from pathlib import Path
 
 import psycopg
@@ -61,6 +62,35 @@ def test_three_logs_reconcile_to_100_percent_and_rerun_adds_nothing(spark):
     assert dp_main(["ingest", *ids]) == 0
     after = spark.sql("select count(*) c from dp.av2.sensor_data").collect()[0].c
     assert after == before
+
+
+@contextmanager
+def _linked_copy(monkeypatch):
+    """A hard-linked copy of a fixture log under its own log id, so the real log's rows are never touched."""
+    real = _fixture_ids()[0]
+    root = load().data_dir.parent / "dp-test-broken"
+    shutil.rmtree(root, ignore_errors=True)
+    log_id = f"{real}-copy-{uuid.uuid4().hex[:8]}"
+    d = root / "sensor" / "val" / log_id
+    shutil.copytree(load().data_dir / "sensor" / "val" / real, d, copy_function=os.link)
+    monkeypatch.setenv("DP_DATA", str(root))
+    try:
+        yield log_id, d
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_restoring_an_earlier_source_selects_its_commit_again(spark, monkeypatch, capsys):
+    with _linked_copy(monkeypatch) as (log_id, d):
+        assert dp_main(["ingest", log_id]) == 0
+        frame = next((d / "sensors" / "cameras" / "ring_side_left").glob("*.jpg"))
+        held = frame.with_suffix(".held")
+        frame.rename(held)
+        assert dp_main(["ingest", log_id]) == 0  # state B: one frame gone
+        held.rename(frame)
+        assert dp_main(["ingest", log_id]) == 0  # back to state A: reuses A's commit
+        capsys.readouterr()
+        assert dp_main(["reconcile", log_id]) == 0, capsys.readouterr().out
 
 
 def test_reconcile_reports_a_frame_the_latest_commit_lacks(spark, monkeypatch, capsys):
