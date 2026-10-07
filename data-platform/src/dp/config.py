@@ -24,7 +24,7 @@ def load() -> Settings:
         catalog_uri=e("DP_CATALOG_URI", "postgresql+psycopg://dp:dp@localhost:5432/iceberg_catalog"),
         warehouse=e("DP_WAREHOUSE", "s3://warehouse/"),
         s3_endpoint=e("DP_S3_ENDPOINT", "http://localhost:9000"),
-        s3_access_key=e("DP_S3_ACCESS_KEY", "dp"),
+        s3_access_key=e("DP_S3_ACCESS_KEY", "dpuser"),
         s3_secret_key=e("DP_S3_SECRET_KEY", "dp-secret-key"),
         trino_url=e("DP_TRINO_URL", "http://localhost:8080"),
     )
