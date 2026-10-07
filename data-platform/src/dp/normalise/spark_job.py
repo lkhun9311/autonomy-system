@@ -5,6 +5,7 @@ The checksum here is of the source file; S2 moves the bytes into the content-add
 """
 
 import hashlib
+import os
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -104,6 +105,10 @@ def _append(spark: SparkSession, table: str, rows: list[dict]) -> None:
 
 
 def normalise_log(spark: SparkSession, log_dir: Path, ingest_commit_id: str) -> dict[str, int]:
+    """Append one log to every table under ingest_commit_id; returns rows written per table.
+
+    Test hook: DP_CRASH_AFTER_TABLE=<table> exits with 99 after that table's append.
+    """
     ensure_tables(spark)
     sensors = list(_sensor_rows(log_dir, ingest_commit_id))
     ts = [r["timestamp_ns"] for r in sensors] or [0]
@@ -128,4 +133,6 @@ def normalise_log(spark: SparkSession, log_dir: Path, ingest_commit_id: str) -> 
         if parts[table]:
             _append(spark, table, parts[table])
         written[table] = len(parts[table])
+        if os.environ.get("DP_CRASH_AFTER_TABLE") == table:
+            raise SystemExit(99)  # test hook: simulate a crash between table appends
     return written

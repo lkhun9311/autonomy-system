@@ -1,15 +1,19 @@
 import os
 import shutil
+import subprocess
 import uuid
 from collections import Counter
 from pathlib import Path
 
+import psycopg
 import pytest
 
 from dp.catalog import spark_session
 from dp.cli import main as dp_main
 from dp.config import load
+from dp.ingest import committed_ids, ingest
 from dp.normalise.spark_job import TABLES, ensure_tables, normalise_log
+from dp.reconcile import compare
 from dp.source.av2 import source_keys
 
 pytestmark = pytest.mark.integration
@@ -79,3 +83,52 @@ def test_reconcile_reports_a_frame_the_latest_commit_lacks(spark, monkeypatch, c
         assert "missing=1 " in capsys.readouterr().out
     finally:
         shutil.rmtree(root, ignore_errors=True)
+
+
+def _ids_in(spark, table: str, log: str) -> set[str]:
+    rows = spark.sql(f"select distinct ingest_commit_id from dp.av2.{table} where log_id = '{log}'").collect()
+    return {r.ingest_commit_id for r in rows}
+
+
+def test_crash_between_tables_leaves_no_committed_rows_and_rerun_matches(spark):
+    log = _fixture_ids()[2]
+    src = load().data_dir / "sensor" / "val" / log
+    version = f"crash-test-{uuid.uuid4().hex[:8]}"  # a fresh key every run, so the crash path always runs
+    before = {t: _ids_in(spark, t, log) for t in ("sensor_data", "pose", "track")}
+    r = subprocess.run(
+        [
+            "uv",
+            "run",
+            "python",
+            "-c",
+            f"from dp.ingest import ingest; ingest(__import__('pathlib').Path('{src}'), '{version}')",
+        ],
+        env=dict(os.environ, DP_CRASH_AFTER_TABLE="pose"),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert r.returncode == 99, r.stderr[-800:]
+    with psycopg.connect(load().pg_dsn) as c:
+        assert (
+            c.execute(
+                "select count(*) from ingest_commit where transform_version = %s", (version,)
+            ).fetchone()[0]
+            == 0
+        )
+        committed = committed_ids(c)
+    new = {t: _ids_in(spark, t, log) - before[t] for t in before}
+    assert len(new["sensor_data"]) == 1 and new["pose"] == new["sensor_data"]  # written before the crash
+    assert not new["track"]  # never reached
+    assert not new["sensor_data"] & committed  # present, but not visible to committed readers
+
+    cid = ingest(src, version)
+    with psycopg.connect(load().pg_dsn) as c:
+        assert cid in committed_ids(c)
+    rows = spark.sql(
+        f"select log_id, sensor, timestamp_ns from dp.av2.sensor_data where ingest_commit_id = '{cid}'"
+    ).collect()
+    assert (
+        compare(source_keys(src), Counter((x.log_id, x.sensor, x.timestamp_ns) for x in rows)).completeness
+        == 1.0
+    )
