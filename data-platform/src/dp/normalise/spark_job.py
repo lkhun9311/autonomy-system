@@ -34,7 +34,7 @@ def _sha256(p: Path) -> str:
     return h.hexdigest()
 
 
-def _sensor_file(log: str, sensor: str, p: Path, codec: str, cid: str) -> dict:
+def _sensor_file(log: str, sensor: str, p: Path, codec: str, cid: str, calibrated: bool = True) -> dict:
     return {
         "log_id": log,
         "sensor": sensor,
@@ -43,7 +43,7 @@ def _sensor_file(log: str, sensor: str, p: Path, codec: str, cid: str) -> dict:
         "byte_size": p.stat().st_size,
         "checksum": _sha256(p),
         "codec": codec,
-        "calibration_id": f"{log}/{sensor}",
+        "calibration_id": f"{log}/{sensor}" if calibrated else None,
         "ingest_commit_id": cid,
     }
 
@@ -53,7 +53,8 @@ def _sensor_rows(log_dir: Path, cid: str) -> Iterator[dict]:
     lidar = log_dir / "sensors" / "lidar"
     for p in sorted(lidar.glob("*.feather")) if lidar.is_dir() else []:
         if p.stem.isdigit():
-            yield _sensor_file(log, "lidar", p, "feather", cid)
+            # AV2 merges up_lidar and down_lidar into one sweep already in the ego-vehicle frame.
+            yield _sensor_file(log, "lidar", p, "feather", cid, calibrated=False)
     cams = log_dir / "sensors" / "cameras"
     for cam in sorted(cams.iterdir()) if cams.is_dir() else []:
         for p in sorted(cam.glob("*.jpg")):

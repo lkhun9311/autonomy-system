@@ -12,7 +12,7 @@ import pytest
 from dp.catalog import spark_session
 from dp.cli import main as dp_main
 from dp.config import load
-from dp.ingest import committed_ids, ingest
+from dp.ingest import committed_ids, ingest, latest_commit
 from dp.normalise.spark_job import TABLES, ensure_tables, normalise_log
 from dp.reconcile import compare
 from dp.source.av2 import source_keys
@@ -162,3 +162,22 @@ def test_crash_between_tables_leaves_no_committed_rows_and_rerun_matches(spark):
         compare(source_keys(src), Counter((x.log_id, x.sensor, x.timestamp_ns) for x in rows)).completeness
         == 1.0
     )
+
+
+def test_every_calibration_reference_resolves_and_lidar_is_in_the_ego_frame(spark, monkeypatch):
+    with _linked_copy(monkeypatch) as (log_id, _):
+        assert dp_main(["ingest", log_id]) == 0
+        with psycopg.connect(load().pg_dsn) as c:
+            cid = latest_commit(c, log_id)
+        dangling = spark.sql(
+            f"""select s.sensor, s.calibration_id from dp.av2.sensor_data s
+                left join dp.av2.calibration k
+                  on k.calibration_id = s.calibration_id and k.ingest_commit_id = s.ingest_commit_id
+                where s.ingest_commit_id = '{cid}' and s.calibration_id is not null and k.calibration_id is null"""
+        ).collect()
+        assert dangling == []
+        lidar = spark.sql(
+            f"select count(*) n, count(calibration_id) k from dp.av2.sensor_data "
+            f"where ingest_commit_id = '{cid}' and sensor = 'lidar'"
+        ).collect()[0]
+        assert lidar.n > 0 and lidar.k == 0
