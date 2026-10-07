@@ -523,8 +523,10 @@ Measured on the development machine: 32 cores, 59 GiB RAM, NVMe at 18 GB/s read,
 0.5 GiB/s per core. No local NVIDIA GPU. Those are stopwatch numbers about the hardware; everything
 else in this section is arithmetic from them or from published rates, and is an estimate.
 
-Storage is 2 TB internal with 1.2 TB free, plus a 4 TB NVMe drive added for this work — about 5.2 TB
-of working space. The corpus stays on it:
+Storage today is one 1.8 TB NVMe disk with about 1 TB free. M1 reads only the Argoverse 2 Sensor
+`val` split, roughly 150 logs at about 1 GB each, and fits in that. The committed corpus below does
+not: a 4 TB NVMe drive is planned for it, and M2 does not start until that drive is installed. The
+corpus will live there:
 
 | | On disk |
 |---|---:|
@@ -539,8 +541,8 @@ Argoverse 2 Lidar would add roughly another 1.5 TB by the estimate above and is 
 
 **The corpus is local on purpose.** The M2 measurements — MLPerf Storage on this NVMe and the format
 comparison on the corpus itself — measure the path from local storage through client memory; moving
-the corpus to object storage would measure the network instead. A year of 1 TB in S3 Standard costs about what the drive did, and at the end of the year
-the drive is still here.
+the corpus to object storage would measure the network instead. A year of 1 TB in S3 Standard costs about as much as the
+planned drive, and at the end of the year the drive is still here.
 
 S3's role is to prove the cloud path — IaC, IRSA, catalog, one slice — not to hold the corpus. Two
 facts decide how archival is done, both of which apply directly to this data:
