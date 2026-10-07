@@ -8,11 +8,13 @@ from pathlib import Path
 
 import psycopg
 import pytest
+from pyiceberg.schema import Schema
+from pyiceberg.types import LongType, NestedField
 
-from dp.catalog import spark_session
+from dp.catalog import pyiceberg_catalog, spark_session
 from dp.cli import main as dp_main
 from dp.config import load
-from dp.ingest import committed_ids, ingest, latest_commit
+from dp.ingest import committed_ids, ingest, latest_commit, snapshot_ids
 from dp.normalise.spark_job import TABLES, ensure_tables, normalise_log
 from dp.reconcile import compare
 from dp.source.av2 import source_keys
@@ -181,3 +183,15 @@ def test_every_calibration_reference_resolves_and_lidar_is_in_the_ego_frame(spar
             f"where ingest_commit_id = '{cid}' and sensor = 'lidar'"
         ).collect()[0]
         assert lidar.n > 0 and lidar.k == 0
+
+
+def test_a_table_without_snapshots_is_recorded_as_none():
+    cat = pyiceberg_catalog(load())
+    ns = f"probe_{uuid.uuid4().hex[:8]}"
+    cat.create_namespace(ns)
+    try:
+        cat.create_table(f"{ns}.empty", Schema(NestedField(1, "x", LongType(), required=False)))
+        assert snapshot_ids(cat, ns, ["empty"]) == {"empty": None}
+    finally:
+        cat.drop_table(f"{ns}.empty")
+        cat.drop_namespace(ns)

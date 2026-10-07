@@ -8,10 +8,12 @@ append-only log: re-ingesting a source state seen before re-activates its commit
 import hashlib
 import json
 import uuid
+from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import psycopg
+from pyiceberg.catalog import Catalog
 
 from dp.canonical import digest
 from dp.catalog import pyiceberg_catalog, spark_session
@@ -57,6 +59,15 @@ def latest_commit(conn: psycopg.Connection, log_id: str) -> str | None:
     return str(row[0]) if row else None
 
 
+def snapshot_ids(cat: Catalog, namespace: str, tables: Iterable[str]) -> dict[str, int | None]:
+    """Current snapshot per table; None for a table nothing has been appended to yet (zero rows)."""
+    out: dict[str, int | None] = {}
+    for t in tables:
+        snap = cat.load_table(f"{namespace}.{t}").current_snapshot()
+        out[t] = snap.snapshot_id if snap else None
+    return out
+
+
 def _activate(conn: psycopg.Connection, log_id: str, cid: str) -> str:
     if latest_commit(conn, log_id) != cid:
         conn.execute("insert into ingest_activation(log_id, commit_id) values (%s, %s)", (log_id, cid))
@@ -75,7 +86,7 @@ def ingest(log_dir: Path, transform_version: str) -> str:
         cid = str(uuid.uuid4())
         normalise_log(spark_session(s, "ingest"), log_dir, cid)
         cat = pyiceberg_catalog(s)
-        snaps = {t: cat.load_table(f"av2.{t}").current_snapshot().snapshot_id for t in TABLES}
+        snaps = snapshot_ids(cat, "av2", TABLES)
         with conn.transaction():  # the commit and its activation become visible together
             conn.execute(
                 "insert into ingest_commit(id, log_id, source_digest, transform_version, snapshots) "
