@@ -393,9 +393,10 @@ artefacts are built here for later use: per-sensor event counts derived from the
 *without* going through the transform, and a hand-checked fixture of a few logs. A local
 single-node Trino reads two fixed snapshots and returns their expected rows — an interoperability
 and time-travel check, not a second implementation. Release state changes go out on
-`release.events` through the outbox on a single-broker Kafka, and the console follows them from
-there.
-*Excluded here: throughput headlines, S3, clusters, streaming ingest.*
+`release.events` through the outbox on a single-broker Kafka, and the `dp` CLI follows them from
+there; the loader ships as an installable Python package that refuses rather than degrades.
+*Excluded here: throughput headlines, S3, clusters, streaming ingest, the operator console, offline
+loads.*
 
 **M2 — the measured data path.** MLPerf Storage v3.0 runs in the closed division on this hardware:
 `RetinaNet` for the small-random-read path, `3D U-Net` for the large-sequential one, and
@@ -410,7 +411,11 @@ Every release emits Croissant 1.1 metadata with PROV-O provenance and passes the
 failure repaired idempotently and partial backfill by log, sensor, date or quality slice. Terraform,
 S3, IAM/IRSA and `terraform plan` in CI, Argo CD reconciling `deploy/`, and one small cluster run
 that proves deployment and permissions — not performance. A PyTorch dataloader measures what
-actually reaches training; publication latency is first measurable here.
+actually reaches training; publication latency is first measurable here. The operator console
+arrives here, following `release.events`; its assistant answers from release, gate and history
+records retrieved through pgvector rather than from free generation, and every change it proposes
+goes through the same API call a person would make. Signed approval certificates make `--offline`
+loads possible from this milestone on.
 
 **M4 — the event backbone and its equivalence check.** The three ingest topics above go up on a
 local cluster beside the `release.events` topic M1 already runs: `blob.arrived` drives checksum
