@@ -4,8 +4,10 @@ The row is written after every table append succeeded; readers select rows whose
 committed, and per log only the last commit (spec §5).
 """
 
+import hashlib
 import json
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import psycopg
@@ -26,12 +28,17 @@ def ensure_schema(conn: psycopg.Connection) -> None:
     conn.execute(DDL)
 
 
+def _file_item(log_dir: Path, p: Path) -> bytes:
+    with p.open("rb") as f:
+        sha = hashlib.file_digest(f, "sha256").hexdigest()
+    return f"{p.relative_to(log_dir)}|{sha}".encode()
+
+
 def source_digest(log_dir: Path) -> str:
-    """Digest of (relative path, size) for every file: cheap, and changes when a file appears or goes."""
-    items = [
-        f"{p.relative_to(log_dir)}|{p.stat().st_size}".encode() for p in log_dir.rglob("*") if p.is_file()
-    ]
-    return digest(items)
+    """Digest of (relative path, content sha256) for every file, so a same-size edit is a new source."""
+    files = sorted(p for p in log_dir.rglob("*") if p.is_file())
+    with ThreadPoolExecutor() as pool:  # hashlib releases the GIL on large reads
+        return digest(list(pool.map(lambda p: _file_item(log_dir, p), files)))
 
 
 def committed_ids(conn: psycopg.Connection) -> set[str]:
