@@ -232,13 +232,17 @@ Differences of one or two postings sit inside its noise and nothing here rests o
 | Kafka | the release control plane from M1 (`release.events`); the ingest control plane from M4 — topics partitioned by `log_id`, consumer groups, offsets as resumability, DLQ into quarantine | M1, M4 | 14/20 |
 | Schema Registry | Avro envelope subjects with a stated compatibility policy, tested against the Iceberg table schema | M4 | — |
 | Kafka Connect | the Iceberg sink, and the connector/offset/snapshot operation the postings ask about by name | M4 | — |
+| Flink | the streaming side of the equivalence check — event time, watermarks and checkpoints over `replay.sensor`, writing through its Iceberg sink | M4 | — |
 | Debezium | the Outbox Event Router on the release-state Postgres, so release history is a table rather than a log | M1 | — |
 | OpenCLIP | segment embeddings; the vector side of scenario mining | M5 | — |
 | MongoDB | **not used** — one posting in twenty, and there as an example rather than a requirement | — | 1/20 |
 
-Deliberately excluded: Flink (9/20 is not low, but learning a fourth engine while Spark, Kafka and
-Airflow are all at zero lines means none of them gets deep), managed warehouses (they take `$/TB`
-out of our hands), and dbt (this is a platform, not analytics engineering).
+Deliberately excluded: managed warehouses (they take `$/TB` out of our hands), a feature store and
+a standalone retrieval-augmented service (each is a product of its own, not a property of a release).
+Flink was on this list as a fourth engine to learn while Spark, Kafka and Airflow were at zero lines.
+It came off because M4 needs a stream processor anyway — event time and watermarks are what that
+milestone tests — and Flink appears in Korean data-platform postings about as often as Iceberg does.
+It is used there and nowhere else.
 
 That exclusion is about breadth, and it is why Kafka Connect, Schema Registry and Debezium are *not*
 excluded by it. They are Kafka's own components rather than a fourth engine, and they are the
@@ -426,7 +430,9 @@ partition assignment, offset management and DLQ routing are operated rather than
 that is the difference the postings are asking about.
 
 Then the same logs are replayed on `replay.sensor` at their recorded timestamps, one producer per
-sensor stream. Rates are Argoverse 2's — nine cameras at 20 fps, the merged LiDAR sweep at 10 Hz —
+sensor stream, and a Flink job turns that stream into the streaming table — event time, watermarks
+and checkpoints are its job, and its Iceberg sink is the handover the duplicate and restart
+injections attack. Rates are Argoverse 2's — nine cameras at 20 fps, the merged LiDAR sweep at 10 Hz —
 which are capture rates rather than a promise that every interval is exactly `1/Hz`, and which M1
 has already checked against the data. The arrival model is stated and seeded, and an
 order-preserving control run says how much of the outcome the disorder is responsible for. Duplicate
