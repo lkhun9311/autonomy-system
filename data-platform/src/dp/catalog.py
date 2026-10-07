@@ -43,6 +43,8 @@ def spark_session(s: Settings, app: str) -> SparkSession:
         .config(f"{c}.jdbc.password", pw)
         .config(f"{c}.jdbc.schema-version", "V1")
         .config(f"{c}.warehouse", s.warehouse)
+        # Other processes commit to these tables; a cached table would hide their snapshots.
+        .config(f"{c}.cache-enabled", "false")
         .config(f"{c}.io-impl", "org.apache.iceberg.aws.s3.S3FileIO")
         .config(f"{c}.s3.endpoint", s.s3_endpoint)
         .config(f"{c}.s3.path-style-access", "true")
