@@ -2,6 +2,7 @@ import subprocess
 
 import psycopg
 import pytest
+import trino
 
 from dp.config import load
 
@@ -52,3 +53,22 @@ def test_volumes_survive_restart():
     subprocess.run(["docker", "compose", "exec", "-T", "postgres", "pg_isready", "-t", "30"], check=True)
     with psycopg.connect(load().pg_dsn) as c:
         assert c.execute("select count(*) from stack_probe").fetchone()[0] >= 1
+
+
+def _trino(sql: str) -> list:
+    cur = trino.dbapi.connect(host="localhost", port=8080, user="dp", catalog="iceberg").cursor()
+    cur.execute(sql)
+    return cur.fetchall()
+
+
+def test_trino_catalog_survives_postgres_restart():
+    # Postgres ends pooled sessions with SQLSTATE 57P01; Trino must reconnect, not fail every query.
+    _trino("create schema if not exists iceberg.stack_probe")
+    _trino("create table if not exists iceberg.stack_probe.t (x integer)")
+    r = subprocess.run(
+        ["docker", "compose", "restart", "postgres"], capture_output=True, text=True, check=False
+    )
+    assert r.returncode == 0, r.stderr[-500:]
+    subprocess.run(["docker", "compose", "exec", "-T", "postgres", "pg_isready", "-t", "30"], check=True)
+    for _ in range(5):
+        assert _trino("select count(*) from iceberg.stack_probe.t") == [[0]]
