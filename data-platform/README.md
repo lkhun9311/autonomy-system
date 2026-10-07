@@ -222,6 +222,8 @@ Differences of one or two postings sit inside its noise and nothing here rests o
 | Trino | SQL and time travel over the canonical tables; the predicate side of scenario mining; the row-level diff in M4 | M1, M4, M5 | 5/20 |
 | Lance | embeddings and random access, measured against Iceberg-plus-blobs on the Argoverse 2 corpus under a pre-registered method | M2 | — |
 | Airflow | backfill → quality gate → publish, with an injected failure repaired idempotently | M3 | 18/20 |
+| dbt Core | one mart over gate outcomes — fact at log × sensor × check version, dimensions for date, sensor and policy — built incrementally and tested | M3 | — |
+| OpenLineage | run-level lineage from Airflow and Spark, from source log to release, beside owner, classification and retention records | M3 | — |
 | Terraform · S3 · IRSA | one deployment and permission path proved off the laptop — not performance | M3 | — |
 | GitHub Actions | contract and quality-rule tests, plan on every PR, apply only from `main` | M3 | — |
 | Argo CD | drift — whether what runs is what is in git | M3 | — |
@@ -386,7 +388,9 @@ the postings name.
 ## Milestones
 
 Ordered by dependency where one exists and by priority where it does not, and the two are labelled
-rather than blurred. M2 and M3 depend on M1 and on nothing else. M4 depends on M1, because the batch
+rather than blurred. M2 and M3 depend on M1 and on nothing else. By priority, the local half of M3 —
+Airflow backfill and recovery, alerting, the mart and lineage — runs before M2, because operating a
+pipeline is what most postings ask for first; the cloud half of M3 follows M2. M4 depends on M1, because the batch
 table is what its equivalence check compares against. M5 depends on M4, because its promotion loop
 consumes `sweep.quality`, and on M1, because the checks that fill that topic live there.
 
@@ -408,14 +412,19 @@ checkpointing for the write path, each reported beside the published rows of its
 class. Separately, Iceberg with external blobs and Lance are measured against each other on the
 Argoverse 2 corpus — random frame reads and sequential sweep reads through the same PyTorch
 dataloader — with the method, the configurations and the access mix registered before the run.
-Every release emits Croissant 1.1 metadata with PROV-O provenance and passes the validator.
+Every release emits Croissant 1.1 metadata with PROV-O provenance and passes the validator. The
+normalisation job is read through its Spark plan — shuffle, spill, partition pruning — and through
+Trino's `EXPLAIN`, with input size, time, memory and file sizes recorded, so that "it ran" becomes
+"this is what it cost and where".
 *A reviewed MLCommons submission is a stretch goal and is recorded as one.*
 
 **M3 — reproducible supply.** Airflow runs backfill → quality gate → publish, with an injected task
 failure repaired idempotently and partial backfill by log, sensor, date or quality slice. Terraform,
 S3, IAM/IRSA and `terraform plan` in CI, Argo CD reconciling `deploy/`, and one small cluster run
 that proves deployment and permissions — not performance. A PyTorch dataloader measures what
-actually reaches training; publication latency is first measurable here. The operator console
+actually reaches training; publication latency is first measurable here. One Prometheus alert is
+fired on purpose and its recovery recorded, the gate-outcome mart is built with dbt, and lineage is
+emitted through OpenLineage — each a thing the postings name and none of them a new engine. The operator console
 arrives here, following `release.events`; its assistant answers from release, gate and history
 records retrieved through pgvector rather than from free generation, and every change it proposes
 goes through the same API call a person would make. Signed approval certificates make `--offline`
