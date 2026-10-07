@@ -1,4 +1,5 @@
 """One Iceberg catalog shared by Spark, PyIceberg and Trino: JDBC on Postgres, warehouse on MinIO."""
+
 from pyiceberg.catalog.sql import SqlCatalog
 from pyspark.sql import SparkSession
 
@@ -31,7 +32,8 @@ def spark_session(s: Settings, app: str) -> SparkSession:
     user, pw = user_pw.split(":", 1)
     c = f"spark.sql.catalog.{CATALOG_NAME}"
     return (
-        SparkSession.builder.appName(app).master("local[*]")
+        SparkSession.builder.appName(app)
+        .master("local[*]")
         .config("spark.jars.packages", f"{ICEBERG_SPARK},{ICEBERG_AWS},{PG_JDBC}")
         .config("spark.sql.extensions", "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions")
         .config(c, "org.apache.iceberg.spark.SparkCatalog")

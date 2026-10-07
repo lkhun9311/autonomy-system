@@ -1,4 +1,5 @@
 """Runtime settings. Every value comes from the environment with a local-stack default."""
+
 import os
 from dataclasses import dataclass
 from pathlib import Path
