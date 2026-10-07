@@ -1,0 +1,24 @@
+"""DDL for the canonical tables (spec §3.1). Kept as SQL so Trino and Spark read the same text."""
+
+NS = "dp.av2"
+DDL = {
+    "log": f"""create table if not exists {NS}.log (
+        log_id string, city string, start_ns bigint, end_ns bigint, source_path string,
+        source_digest string, ingest_commit_id string) using iceberg""",
+    "sensor_data": f"""create table if not exists {NS}.sensor_data (
+        log_id string, sensor string, timestamp_ns bigint, source_path string, byte_size bigint,
+        checksum string, codec string, calibration_id string, ingest_commit_id string)
+        using iceberg partitioned by (log_id)""",
+    "pose": f"""create table if not exists {NS}.pose (
+        log_id string, timestamp_ns bigint, qw double, qx double, qy double, qz double,
+        tx_m double, ty_m double, tz_m double, ingest_commit_id string) using iceberg""",
+    "calibration": f"""create table if not exists {NS}.calibration (
+        log_id string, sensor string, calibration_id string, qw double, qx double, qy double, qz double,
+        tx_m double, ty_m double, tz_m double, fx_px double, fy_px double, cx_px double, cy_px double,
+        ingest_commit_id string) using iceberg""",
+    "track": f"""create table if not exists {NS}.track (
+        log_id string, timestamp_ns bigint, track_uuid string, category string,
+        length_m double, width_m double, height_m double, qw double, qx double, qy double, qz double,
+        tx_m double, ty_m double, tz_m double, num_interior_pts bigint, ingest_commit_id string)
+        using iceberg partitioned by (log_id)""",
+}
