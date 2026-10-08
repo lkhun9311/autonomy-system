@@ -16,7 +16,7 @@ from dp.ingest import ensure_schema, ingest, latest_commit
 from dp.reconcile import compare
 from dp.source.av2 import source_keys
 
-TRANSFORM_VERSION = "s1"
+TRANSFORM_VERSION = "s2"
 # The fetch helper lives in the source checkout, not in the wheel: `dp fetch` is a development command.
 FETCH_SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "fetch_av2.sh"
 _LOG_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*")

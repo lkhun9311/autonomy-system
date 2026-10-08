@@ -1,3 +1,4 @@
+import hashlib
 import os
 import shutil
 import subprocess
@@ -11,6 +12,7 @@ import pytest
 from pyiceberg.schema import Schema
 from pyiceberg.types import LongType, NestedField
 
+from dp.blob import BlobRef, BlobStore, key_for, s3_client
 from dp.catalog import pyiceberg_catalog, spark_session
 from dp.cli import main as dp_main
 from dp.config import load
@@ -39,7 +41,7 @@ def test_sensor_rows_match_source_keys(spark):
     d = _log_dir()
     ensure_tables(spark)
     cid = str(uuid.uuid4())
-    written = normalise_log(spark, d, cid)
+    written = normalise_log(spark, d, cid, BlobStore(s3_client(load())))
     rows = spark.sql(
         f"select log_id, sensor, timestamp_ns from dp.av2.sensor_data where ingest_commit_id = '{cid}'"
     ).collect()
@@ -195,3 +197,33 @@ def test_a_table_without_snapshots_is_recorded_as_none():
     finally:
         cat.drop_table(f"{ns}.empty")
         cat.drop_namespace(ns)
+
+
+def _latest_rows(spark, log_id):
+    with psycopg.connect(load().pg_dsn) as c:
+        cid = latest_commit(c, log_id)
+    return spark.sql(
+        "select sensor, timestamp_ns, checksum, blob_uri, blob_version_id from dp.av2.sensor_data "
+        f"where ingest_commit_id = '{cid}'"
+    ).collect()
+
+
+def test_every_sensor_row_pins_a_content_named_blob_whose_bytes_match(spark, monkeypatch):
+    # A fresh log id every run: re-ingesting a fixture log would hit its existing commit and test nothing.
+    with _linked_copy(monkeypatch) as (log_id, _):
+        assert dp_main(["ingest", log_id]) == 0
+        rows = _latest_rows(spark, log_id)
+    assert rows and all(r.blob_uri == f"s3://blobs/{key_for(r.checksum)}" and r.blob_version_id for r in rows)
+    store = BlobStore(s3_client(load()))
+    for r in sorted(rows, key=lambda r: (r.sensor, r.timestamp_ns))[::300]:
+        assert hashlib.sha256(store.get(BlobRef(r.blob_uri, r.blob_version_id))).hexdigest() == r.checksum
+
+
+def test_the_same_files_under_another_log_pin_the_same_versions(spark, monkeypatch):
+    real = _fixture_ids()[0]
+    assert dp_main(["ingest", real]) == 0
+    pins = {r.checksum: r.blob_version_id for r in _latest_rows(spark, real)}
+    with _linked_copy(monkeypatch) as (log_id, _):
+        assert dp_main(["ingest", log_id]) == 0
+        copy = {r.checksum: r.blob_version_id for r in _latest_rows(spark, log_id)}
+    assert copy == pins

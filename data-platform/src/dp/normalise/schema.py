@@ -7,7 +7,8 @@ DDL = {
         source_digest string, ingest_commit_id string) using iceberg""",
     "sensor_data": f"""create table if not exists {NS}.sensor_data (
         log_id string, sensor string, timestamp_ns bigint, source_path string, byte_size bigint,
-        checksum string, codec string, calibration_id string, ingest_commit_id string)
+        checksum string, codec string, calibration_id string, ingest_commit_id string,
+        blob_uri string, blob_version_id string)
         using iceberg partitioned by (log_id)""",
     "pose": f"""create table if not exists {NS}.pose (
         log_id string, timestamp_ns bigint, qw double, qx double, qy double, qz double,
@@ -22,3 +23,7 @@ DDL = {
         tx_m double, ty_m double, tz_m double, num_interior_pts bigint, ingest_commit_id string)
         using iceberg partitioned by (log_id)""",
 }
+
+# Columns added after a table first shipped. ensure_tables adds them where missing; Iceberg appends
+# them at the end, which is why the DDL above lists them last too.
+ADDED_COLUMNS = {"sensor_data": [("blob_uri", "string"), ("blob_version_id", "string")]}

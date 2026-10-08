@@ -7,12 +7,14 @@ The checksum here is of the source file; S2 moves the bytes into the content-add
 import hashlib
 import os
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from pyarrow import feather
 from pyspark.sql import SparkSession
 
-from dp.normalise.schema import DDL, NS
+from dp.blob import BlobStore
+from dp.normalise.schema import ADDED_COLUMNS, DDL, NS
 
 TABLES = tuple(DDL)
 _POSE = ("qw", "qx", "qy", "qz", "tx_m", "ty_m", "tz_m")
@@ -24,6 +26,11 @@ def ensure_tables(spark: SparkSession) -> None:
     spark.sql(f"create namespace if not exists {NS}")
     for ddl in DDL.values():
         spark.sql(ddl)
+    for table, columns in ADDED_COLUMNS.items():
+        have = set(spark.table(f"{NS}.{table}").columns)
+        missing = [f"{name} {kind}" for name, kind in columns if name not in have]
+        if missing:
+            spark.sql(f"alter table {NS}.{table} add columns ({', '.join(missing)})")
 
 
 def _sha256(p: Path) -> str:
@@ -34,32 +41,46 @@ def _sha256(p: Path) -> str:
     return h.hexdigest()
 
 
-def _sensor_file(log: str, sensor: str, p: Path, codec: str, cid: str, calibrated: bool = True) -> dict:
+def _sensor_file(
+    store: BlobStore, log: str, sensor: str, p: Path, codec: str, cid: str, calibrated: bool = True
+) -> dict:
+    checksum = _sha256(p)
+    ref = store.put(p, checksum)
     return {
         "log_id": log,
         "sensor": sensor,
         "timestamp_ns": int(p.stem),
         "source_path": str(p),
         "byte_size": p.stat().st_size,
-        "checksum": _sha256(p),
+        "checksum": checksum,
         "codec": codec,
         "calibration_id": f"{log}/{sensor}" if calibrated else None,
         "ingest_commit_id": cid,
+        "blob_uri": ref.uri,
+        "blob_version_id": ref.version_id,
     }
 
 
-def _sensor_rows(log_dir: Path, cid: str) -> Iterator[dict]:
-    log = log_dir.name
+def _sensor_files(log_dir: Path) -> Iterator[tuple[str, Path, str, bool]]:
     lidar = log_dir / "sensors" / "lidar"
     for p in sorted(lidar.glob("*.feather")) if lidar.is_dir() else []:
         if p.stem.isdigit():
             # AV2 merges up_lidar and down_lidar into one sweep already in the ego-vehicle frame.
-            yield _sensor_file(log, "lidar", p, "feather", cid, calibrated=False)
+            yield "lidar", p, "feather", False
     cams = log_dir / "sensors" / "cameras"
     for cam in sorted(cams.iterdir()) if cams.is_dir() else []:
         for p in sorted(cam.glob("*.jpg")):
             if p.stem.isdigit():
-                yield _sensor_file(log, cam.name, p, "jpeg", cid)
+                yield cam.name, p, "jpeg", True
+
+
+def _sensor_rows(log_dir: Path, cid: str, store: BlobStore) -> list[dict]:
+    log = log_dir.name
+    files = list(_sensor_files(log_dir))
+    with ThreadPoolExecutor(max_workers=16) as pool:  # one boto3 client, shared: clients are thread-safe
+        return list(
+            pool.map(lambda f: _sensor_file(store, log, f[0], f[1], f[2], cid, calibrated=f[3]), files)
+        )
 
 
 def _read(path: Path) -> list[dict]:
@@ -105,13 +126,15 @@ def _append(spark: SparkSession, table: str, rows: list[dict]) -> None:
     spark.createDataFrame(data, schema).writeTo(f"{NS}.{table}").append()
 
 
-def normalise_log(spark: SparkSession, log_dir: Path, ingest_commit_id: str) -> dict[str, int]:
+def normalise_log(
+    spark: SparkSession, log_dir: Path, ingest_commit_id: str, store: BlobStore
+) -> dict[str, int]:
     """Append one log to every table under ingest_commit_id; returns rows written per table.
 
     Test hook: DP_CRASH_AFTER_TABLE=<table> exits with 99 after that table's append.
     """
     ensure_tables(spark)
-    sensors = list(_sensor_rows(log_dir, ingest_commit_id))
+    sensors = _sensor_rows(log_dir, ingest_commit_id, store)
     ts = [r["timestamp_ns"] for r in sensors] or [0]
     log_row = {
         "log_id": log_dir.name,
