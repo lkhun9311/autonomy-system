@@ -1,4 +1,5 @@
 import subprocess
+import time
 
 import psycopg
 import pytest
@@ -7,6 +8,20 @@ import trino
 from dp.config import load
 
 pytestmark = pytest.mark.integration
+
+
+def _wait_for_postgres(timeout_s: float = 60.0) -> None:
+    # pg_isready -t does not wait through "rejecting connections" (exit 1) while the server starts up.
+    deadline = time.monotonic() + timeout_s
+    while True:
+        try:
+            with psycopg.connect(load().pg_dsn, connect_timeout=2) as c:
+                c.execute("select 1")
+            return
+        except psycopg.OperationalError:
+            if time.monotonic() > deadline:
+                raise
+            time.sleep(0.5)
 
 
 def test_postgres_has_both_databases():
@@ -50,7 +65,7 @@ def test_volumes_survive_restart():
         ["docker", "compose", "restart", "postgres"], capture_output=True, text=True, check=False
     )
     assert r.returncode == 0, r.stderr[-500:]
-    subprocess.run(["docker", "compose", "exec", "-T", "postgres", "pg_isready", "-t", "30"], check=True)
+    _wait_for_postgres()
     with psycopg.connect(load().pg_dsn) as c:
         assert c.execute("select count(*) from stack_probe").fetchone()[0] >= 1
 
@@ -69,6 +84,6 @@ def test_trino_catalog_survives_postgres_restart():
         ["docker", "compose", "restart", "postgres"], capture_output=True, text=True, check=False
     )
     assert r.returncode == 0, r.stderr[-500:]
-    subprocess.run(["docker", "compose", "exec", "-T", "postgres", "pg_isready", "-t", "30"], check=True)
+    _wait_for_postgres()
     for _ in range(5):
         assert _trino("select count(*) from iceberg.stack_probe.t") == [[0]]
