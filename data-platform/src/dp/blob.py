@@ -5,12 +5,14 @@ gain new versions or a delete marker, but a written version cannot be removed or
 (uri, version_id); readers read that version, never the key's current one.
 """
 
+import hashlib
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
 import boto3
 from botocore.config import Config
+from botocore.exceptions import ClientError
 
 from dp.config import Settings
 
@@ -53,9 +55,28 @@ class BlobStore:
             raise ValueError(f"{ref.uri} is not in bucket {self.bucket}")
         return ref.uri.removeprefix(prefix)
 
+    def _current(self, key: str) -> tuple[str, str] | None:
+        """(version_id, recorded sha256) of the key's current version; None for no key or a delete marker."""
+        try:
+            h = self.s3.head_object(Bucket=self.bucket, Key=key)
+        except ClientError as e:
+            if e.response["ResponseMetadata"]["HTTPStatusCode"] in (404, 405):
+                return None
+            raise
+        return h["VersionId"], h.get("Metadata", {}).get("sha256", "")
+
     def put(self, data: bytes | Path, sha256_hex: str, retain_until: datetime | None = None) -> BlobRef:
+        """Store bytes under their own hash. Refuses bytes that do not match it. Reuses the key's current
+        version when its recorded sha256 matches; the bytes are not re-read, so a forged version with
+        matching metadata is reused here and caught by verification (dp.verify)."""
         body = data.read_bytes() if isinstance(data, Path) else data
+        actual = hashlib.sha256(body).hexdigest()
+        if actual != sha256_hex:
+            raise ValueError(f"refusing to store bytes as {sha256_hex}: they hash to {actual}")
         key = key_for(sha256_hex)
+        current = self._current(key)
+        if current and current[1] == sha256_hex:
+            return BlobRef(f"s3://{self.bucket}/{key}", current[0])
         lock = (
             {"ObjectLockMode": "COMPLIANCE", "ObjectLockRetainUntilDate": retain_until}
             if retain_until
