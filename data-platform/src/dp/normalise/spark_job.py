@@ -10,6 +10,7 @@ from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+import numpy as np
 from pyarrow import feather
 from pyspark.sql import SparkSession
 
@@ -110,6 +111,33 @@ def _sample_rows(log: str, sensors: list[dict], cid: str) -> list[dict]:
     return rows
 
 
+def _one(log_dir: Path, pattern: str) -> Path:
+    found = sorted((log_dir / "map").glob(pattern))
+    if len(found) != 1:
+        raise ValueError(f"{log_dir.name}: expected one map/{pattern}, found {len(found)}")
+    return found[0]
+
+
+def _map_raster_rows(log_dir: Path, cid: str, store: BlobStore) -> list[dict]:
+    npy = _one(log_dir, "*_ground_height_surface____*.npy")
+    sim2 = _one(log_dir, "*___img_Sim2_city.json")
+    checksum = _sha256(npy)
+    ref = store.put(npy, checksum)
+    height, width = np.load(npy, mmap_mode="r").shape
+    return [
+        {
+            "log_id": log_dir.name,
+            "raster_blob_uri": ref.uri,
+            "raster_blob_version_id": ref.version_id,
+            "raster_checksum": checksum,
+            "sim2_json": sim2.read_text(),
+            "height_px": int(height),
+            "width_px": int(width),
+            "ingest_commit_id": cid,
+        }
+    ]
+
+
 def _read(path: Path) -> list[dict]:
     return feather.read_table(path).to_pylist()
 
@@ -175,13 +203,14 @@ def normalise_log(
     parts = {
         "sensor_data": sensors,
         "sample": _sample_rows(log_dir.name, sensors, ingest_commit_id),
+        "map_raster": _map_raster_rows(log_dir, ingest_commit_id, store),
         "pose": list(_pose_rows(log_dir, ingest_commit_id)),
         "calibration": list(_calibration_rows(log_dir, ingest_commit_id)),
         "track": list(_track_rows(log_dir, ingest_commit_id)),
         "log": [log_row],
     }
     written = {}
-    for table in ("sensor_data", "sample", "pose", "calibration", "track", "log"):
+    for table in ("sensor_data", "sample", "map_raster", "pose", "calibration", "track", "log"):
         if parts[table]:
             _append(spark, table, parts[table])
         written[table] = len(parts[table])

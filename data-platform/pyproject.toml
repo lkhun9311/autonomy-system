@@ -9,6 +9,7 @@ dependencies = [
   "psycopg[binary]>=3.2",
   "trino>=0.333",
   "boto3>=1.43.106",
+  "numpy>=2.5.3",
 ]
 
 [project.scripts]

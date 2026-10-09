@@ -18,7 +18,7 @@ from dp.reconcile import compare
 from dp.source.av2 import source_keys
 from dp.verify import pinned_rows, verify_rows
 
-TRANSFORM_VERSION = "s3"
+TRANSFORM_VERSION = "s3.2"  # any change to the normalised output bumps this
 # The fetch helper lives in the source checkout, not in the wheel: `dp fetch` is a development command.
 FETCH_SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "fetch_av2.sh"
 _LOG_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*")

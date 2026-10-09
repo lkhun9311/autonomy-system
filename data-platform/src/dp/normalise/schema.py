@@ -20,6 +20,9 @@ DDL = {
     "sample": f"""create table if not exists {NS}.sample (
         log_id string, lidar_ts_ns bigint, cam_frame_ts map<string, bigint>, cam_skew_ns map<string, bigint>,
         ingest_commit_id string) using iceberg partitioned by (log_id)""",
+    "map_raster": f"""create table if not exists {NS}.map_raster (
+        log_id string, raster_blob_uri string, raster_blob_version_id string, raster_checksum string,
+        sim2_json string, height_px int, width_px int, ingest_commit_id string) using iceberg""",
     "track": f"""create table if not exists {NS}.track (
         log_id string, timestamp_ns bigint, track_uuid string, category string,
         length_m double, width_m double, height_m double, qw double, qx double, qy double, qz double,
