@@ -15,6 +15,7 @@ from pyspark.sql import SparkSession
 
 from dp.blob import BlobStore
 from dp.normalise.schema import ADDED_COLUMNS, DDL, NS
+from dp.sample import nearest_frames
 
 TABLES = tuple(DDL)
 _POSE = ("qw", "qx", "qy", "qz", "tx_m", "ty_m", "tz_m")
@@ -83,6 +84,32 @@ def _sensor_rows(log_dir: Path, cid: str, store: BlobStore) -> list[dict]:
         )
 
 
+def _sample_rows(log: str, sensors: list[dict], cid: str) -> list[dict]:
+    """One sample per lidar sweep, from the sensor rows just written, so samples and rows agree."""
+    frames: dict[str, list[int]] = {}
+    sweeps: list[int] = []
+    for r in sensors:
+        if r["sensor"] == "lidar":
+            sweeps.append(r["timestamp_ns"])
+        else:
+            frames.setdefault(r["sensor"], []).append(r["timestamp_ns"])
+    for ts in frames.values():
+        ts.sort()
+    rows = []
+    for lidar_ts in sorted(sweeps):
+        near = nearest_frames(lidar_ts, frames)
+        rows.append(
+            {
+                "log_id": log,
+                "lidar_ts_ns": lidar_ts,
+                "cam_frame_ts": near,
+                "cam_skew_ns": {cam: ts - lidar_ts for cam, ts in near.items()},
+                "ingest_commit_id": cid,
+            }
+        )
+    return rows
+
+
 def _read(path: Path) -> list[dict]:
     return feather.read_table(path).to_pylist()
 
@@ -147,13 +174,14 @@ def normalise_log(
     }
     parts = {
         "sensor_data": sensors,
+        "sample": _sample_rows(log_dir.name, sensors, ingest_commit_id),
         "pose": list(_pose_rows(log_dir, ingest_commit_id)),
         "calibration": list(_calibration_rows(log_dir, ingest_commit_id)),
         "track": list(_track_rows(log_dir, ingest_commit_id)),
         "log": [log_row],
     }
     written = {}
-    for table in ("sensor_data", "pose", "calibration", "track", "log"):
+    for table in ("sensor_data", "sample", "pose", "calibration", "track", "log"):
         if parts[table]:
             _append(spark, table, parts[table])
         written[table] = len(parts[table])
