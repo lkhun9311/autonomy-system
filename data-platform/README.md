@@ -222,6 +222,8 @@ Differences of one or two postings sit inside its noise and nothing here rests o
 | Trino | SQL and time travel over the canonical tables; the predicate side of scenario mining; the row-level diff in M4 | M1, M4, M5 | 5/20 |
 | Lance | embeddings and random access, measured against Iceberg-plus-blobs on the Argoverse 2 corpus under a pre-registered method | M2 | — |
 | Airflow | backfill → quality gate → publish, with an injected failure repaired idempotently | M3 | 18/20 |
+| dbt Core | one mart over gate outcomes — fact at log × sensor × check version, dimensions for date, sensor and policy — built incrementally and tested | M3 | — |
+| OpenLineage | run-level lineage from Airflow and Spark, from source log to release, beside owner, classification and retention records | M3 | — |
 | Terraform · S3 · IRSA | one deployment and permission path proved off the laptop — not performance | M3 | — |
 | GitHub Actions | contract and quality-rule tests, plan on every PR, apply only from `main` | M3 | — |
 | Argo CD | drift — whether what runs is what is in git | M3 | — |
@@ -232,13 +234,17 @@ Differences of one or two postings sit inside its noise and nothing here rests o
 | Kafka | the release control plane from M1 (`release.events`); the ingest control plane from M4 — topics partitioned by `log_id`, consumer groups, offsets as resumability, DLQ into quarantine | M1, M4 | 14/20 |
 | Schema Registry | Avro envelope subjects with a stated compatibility policy, tested against the Iceberg table schema | M4 | — |
 | Kafka Connect | the Iceberg sink, and the connector/offset/snapshot operation the postings ask about by name | M4 | — |
+| Flink | the streaming side of the equivalence check — event time, watermarks and checkpoints over `replay.sensor`, writing through its Iceberg sink | M4 | — |
 | Debezium | the Outbox Event Router on the release-state Postgres, so release history is a table rather than a log | M1 | — |
 | OpenCLIP | segment embeddings; the vector side of scenario mining | M5 | — |
 | MongoDB | **not used** — one posting in twenty, and there as an example rather than a requirement | — | 1/20 |
 
-Deliberately excluded: Flink (9/20 is not low, but learning a fourth engine while Spark, Kafka and
-Airflow are all at zero lines means none of them gets deep), managed warehouses (they take `$/TB`
-out of our hands), and dbt (this is a platform, not analytics engineering).
+Deliberately excluded: managed warehouses (they take `$/TB` out of our hands), a feature store and
+a standalone retrieval-augmented service (each is a product of its own, not a property of a release).
+Flink was on this list as a fourth engine to learn while Spark, Kafka and Airflow were at zero lines.
+It came off because M4 needs a stream processor anyway — event time and watermarks are what that
+milestone tests — and Flink appears in Korean data-platform postings about as often as Iceberg does.
+It is used there and nowhere else.
 
 That exclusion is about breadth, and it is why Kafka Connect, Schema Registry and Debezium are *not*
 excluded by it. They are Kafka's own components rather than a fourth engine, and they are the
@@ -382,7 +388,9 @@ the postings name.
 ## Milestones
 
 Ordered by dependency where one exists and by priority where it does not, and the two are labelled
-rather than blurred. M2 and M3 depend on M1 and on nothing else. M4 depends on M1, because the batch
+rather than blurred. M2 and M3 depend on M1 and on nothing else. By priority, the local half of M3 —
+Airflow backfill and recovery, alerting, the mart and lineage — runs before M2, because operating a
+pipeline is what most postings ask for first; the cloud half of M3 follows M2. M4 depends on M1, because the batch
 table is what its equivalence check compares against. M5 depends on M4, because its promotion loop
 consumes `sweep.quality`, and on M1, because the checks that fill that topic live there.
 
@@ -393,9 +401,10 @@ artefacts are built here for later use: per-sensor event counts derived from the
 *without* going through the transform, and a hand-checked fixture of a few logs. A local
 single-node Trino reads two fixed snapshots and returns their expected rows — an interoperability
 and time-travel check, not a second implementation. Release state changes go out on
-`release.events` through the outbox on a single-broker Kafka, and the console follows them from
-there.
-*Excluded here: throughput headlines, S3, clusters, streaming ingest.*
+`release.events` through the outbox on a single-broker Kafka, and the `dp` CLI follows them from
+there; the loader ships as an installable Python package that refuses rather than degrades.
+*Excluded here: throughput headlines, S3, clusters, streaming ingest, the operator console, offline
+loads.*
 
 **M2 — the measured data path.** MLPerf Storage v3.0 runs in the closed division on this hardware:
 `RetinaNet` for the small-random-read path, `3D U-Net` for the large-sequential one, and
@@ -403,14 +412,23 @@ checkpointing for the write path, each reported beside the published rows of its
 class. Separately, Iceberg with external blobs and Lance are measured against each other on the
 Argoverse 2 corpus — random frame reads and sequential sweep reads through the same PyTorch
 dataloader — with the method, the configurations and the access mix registered before the run.
-Every release emits Croissant 1.1 metadata with PROV-O provenance and passes the validator.
+Every release emits Croissant 1.1 metadata with PROV-O provenance and passes the validator. The
+normalisation job is read through its Spark plan — shuffle, spill, partition pruning — and through
+Trino's `EXPLAIN`, with input size, time, memory and file sizes recorded, so that "it ran" becomes
+"this is what it cost and where".
 *A reviewed MLCommons submission is a stretch goal and is recorded as one.*
 
 **M3 — reproducible supply.** Airflow runs backfill → quality gate → publish, with an injected task
 failure repaired idempotently and partial backfill by log, sensor, date or quality slice. Terraform,
 S3, IAM/IRSA and `terraform plan` in CI, Argo CD reconciling `deploy/`, and one small cluster run
 that proves deployment and permissions — not performance. A PyTorch dataloader measures what
-actually reaches training; publication latency is first measurable here.
+actually reaches training; publication latency is first measurable here. One Prometheus alert is
+fired on purpose and its recovery recorded, the gate-outcome mart is built with dbt, and lineage is
+emitted through OpenLineage — each a thing the postings name and none of them a new engine. The operator console
+arrives here, following `release.events`; its assistant answers from release, gate and history
+records retrieved through pgvector rather than from free generation, and every change it proposes
+goes through the same API call a person would make. Signed approval certificates make `--offline`
+loads possible from this milestone on.
 
 **M4 — the event backbone and its equivalence check.** The three ingest topics above go up on a
 local cluster beside the `release.events` topic M1 already runs: `blob.arrived` drives checksum
@@ -421,7 +439,9 @@ partition assignment, offset management and DLQ routing are operated rather than
 that is the difference the postings are asking about.
 
 Then the same logs are replayed on `replay.sensor` at their recorded timestamps, one producer per
-sensor stream. Rates are Argoverse 2's — nine cameras at 20 fps, the merged LiDAR sweep at 10 Hz —
+sensor stream, and a Flink job turns that stream into the streaming table — event time, watermarks
+and checkpoints are its job, and its Iceberg sink is the handover the duplicate and restart
+injections attack. Rates are Argoverse 2's — nine cameras at 20 fps, the merged LiDAR sweep at 10 Hz —
 which are capture rates rather than a promise that every interval is exactly `1/Hz`, and which M1
 has already checked against the data. The arrival model is stated and seeded, and an
 order-preserving control run says how much of the outcome the disorder is responsible for. Duplicate
@@ -503,8 +523,10 @@ Measured on the development machine: 32 cores, 59 GiB RAM, NVMe at 18 GB/s read,
 0.5 GiB/s per core. No local NVIDIA GPU. Those are stopwatch numbers about the hardware; everything
 else in this section is arithmetic from them or from published rates, and is an estimate.
 
-Storage is 2 TB internal with 1.2 TB free, plus a 4 TB NVMe drive added for this work — about 5.2 TB
-of working space. The corpus stays on it:
+Storage today is one 1.8 TB NVMe disk with about 1 TB free. M1 reads only the Argoverse 2 Sensor
+`val` split, roughly 150 logs at about 1 GB each, and fits in that. The committed corpus below does
+not: a 4 TB NVMe drive is planned for it, and M2 does not start until that drive is installed. The
+corpus will live there:
 
 | | On disk |
 |---|---:|
@@ -519,8 +541,8 @@ Argoverse 2 Lidar would add roughly another 1.5 TB by the estimate above and is 
 
 **The corpus is local on purpose.** The M2 measurements — MLPerf Storage on this NVMe and the format
 comparison on the corpus itself — measure the path from local storage through client memory; moving
-the corpus to object storage would measure the network instead. A year of 1 TB in S3 Standard costs about what the drive did, and at the end of the year
-the drive is still here.
+the corpus to object storage would measure the network instead. A year of 1 TB in S3 Standard costs about as much as the
+planned drive, and at the end of the year the drive is still here.
 
 S3's role is to prove the cloud path — IaC, IRSA, catalog, one slice — not to hold the corpus. Two
 facts decide how archival is done, both of which apply directly to this data:

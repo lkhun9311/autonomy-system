@@ -1,0 +1,35 @@
+name: dp
+services:
+  postgres:
+    image: postgres:16
+    environment: {POSTGRES_USER: dp, POSTGRES_PASSWORD: dp, POSTGRES_DB: dp}
+    command: ["postgres", "-c", "wal_level=logical", "-c", "max_replication_slots=4", "-c", "max_wal_senders=4"]
+    ports: ["5432:5432"]
+    volumes:
+      - pg:/var/lib/postgresql/data
+      - ./docker/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck: {test: ["CMD", "pg_isready", "-U", "dp"], interval: 5s, retries: 20}
+  minio:
+    image: minio/minio:latest
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment: {MINIO_ROOT_USER: dpuser, MINIO_ROOT_PASSWORD: dp-secret-key}
+    ports: ["9000:9000", "9001:9001"]
+    volumes: [minio:/data]
+    healthcheck: {test: ["CMD", "mc", "ready", "local"], interval: 5s, retries: 20}
+  minio-init:
+    image: minio/minio:latest
+    depends_on: {minio: {condition: service_healthy}}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        mc alias set local http://minio:9000 dpuser dp-secret-key &&
+        mc mb --ignore-existing local/warehouse &&
+        (mc ls local/blobs >/dev/null || mc mb --with-lock local/blobs) &&
+        mc retention set --default COMPLIANCE 3650d local/blobs &&
+        tail -f /dev/null
+  trino:
+    image: trinodb/trino:476
+    depends_on: {postgres: {condition: service_healthy}, minio-init: {condition: service_started}}
+    ports: ["8080:8080"]
+    volumes: [./docker/trino/catalog:/etc/trino/catalog:ro]
+volumes: {pg: {}, minio: {}}
