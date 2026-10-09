@@ -57,3 +57,15 @@ def pinned_rows(spark, table: str, log_id: str, commit_id: str) -> list[dict]:
             f"where log_id = '{log_id}' and ingest_commit_id = '{commit_id}'"
         ).collect()
     ]
+
+
+def pinned_raster_rows(spark, table: str, log_id: str, commit_id: str) -> list[dict]:
+    """The ground raster's pin in the same shape as a sensor row, so verify_rows checks it too."""
+    return [
+        r.asDict()
+        for r in spark.sql(
+            "select raster_blob_uri as blob_uri, raster_blob_version_id as blob_version_id, "
+            f"raster_checksum as checksum from {table} "
+            f"where log_id = '{log_id}' and ingest_commit_id = '{commit_id}'"
+        ).collect()
+    ]

@@ -127,3 +127,28 @@ def test_a_table_from_before_s2_reports_no_blob_pinned_instead_of_crashing():
     finally:
         spark.sql(f"drop table if exists {ns}.sensor_data purge")
         spark.sql(f"drop namespace if exists {ns}")
+
+
+def test_a_forged_ground_raster_is_caught_by_verify(fresh_log, capsys):
+    import numpy as np
+
+    log_id, d = fresh_log
+    npy = next((d / "map").glob("*_ground_height_surface____*.npy"))
+    arr = np.load(npy)
+    arr.flat[0] = arr.flat[0] + 1e-3 if np.isfinite(arr.flat[0]) else 0.123  # bytes no other log has
+    npy.unlink()  # break the hard link before writing
+    np.save(npy, arr)
+    sha = hashlib.sha256(npy.read_bytes()).hexdigest()
+    _store().s3.put_object(
+        Bucket=BUCKET,
+        Key=key_for(sha),
+        Body=b"forged raster",
+        Metadata={"sha256": sha},
+        ObjectLockMode="COMPLIANCE",
+        ObjectLockRetainUntilDate=_tomorrow(),
+    )
+    assert dp_main(["ingest", log_id]) == 0
+    capsys.readouterr()
+    assert dp_main(["verify-blobs", log_id]) == 1
+    out = capsys.readouterr().out
+    assert key_for(sha) in out and hashlib.sha256(b"forged raster").hexdigest() in out
