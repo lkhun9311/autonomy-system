@@ -18,7 +18,8 @@ from dp.blob import BlobStore
 from dp.normalise.schema import ADDED_COLUMNS, DDL, NS
 from dp.sample import nearest_frames
 
-TABLES = tuple(DDL)
+# What normalisation writes, in write order. sweep_stat is in DDL but written by dp check, not here.
+TABLES = ("sensor_data", "sample", "map_raster", "pose", "calibration", "track", "log")
 _POSE = ("qw", "qx", "qy", "qz", "tx_m", "ty_m", "tz_m")
 _INTRINSICS = ("fx_px", "fy_px", "cx_px", "cy_px")
 _BOX = ("length_m", "width_m", "height_m")
@@ -210,7 +211,7 @@ def normalise_log(
         "log": [log_row],
     }
     written = {}
-    for table in ("sensor_data", "sample", "map_raster", "pose", "calibration", "track", "log"):
+    for table in TABLES:
         if parts[table]:
             append_rows(spark, table, parts[table])
         written[table] = len(parts[table])
