@@ -45,6 +45,8 @@ def spark_session(s: Settings, app: str) -> SparkSession:
         .config(f"{c}.warehouse", s.warehouse)
         # Other processes commit to these tables; a cached table would hide their snapshots.
         .config(f"{c}.cache-enabled", "false")
+        # Postgres ends pooled sessions with 57P01-57P03 on restart; retry them instead of failing (as Trino).
+        .config(f"{c}.retryable_status_codes", "57P01,57P02,57P03")
         .config(f"{c}.io-impl", "org.apache.iceberg.aws.s3.S3FileIO")
         .config(f"{c}.s3.endpoint", s.s3_endpoint)
         .config(f"{c}.s3.path-style-access", "true")

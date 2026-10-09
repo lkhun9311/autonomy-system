@@ -5,6 +5,7 @@ import psycopg
 import pytest
 import trino
 
+from dp.catalog import spark_session
 from dp.config import load
 
 pytestmark = pytest.mark.integration
@@ -87,3 +88,18 @@ def test_trino_catalog_survives_postgres_restart():
     _wait_for_postgres()
     for _ in range(5):
         assert _trino("select count(*) from iceberg.stack_probe.t") == [[0]]
+
+
+def test_spark_catalog_survives_postgres_restart():
+    # Same failure as Trino above: a long-lived Spark session holds pooled catalog connections.
+    spark = spark_session(load(), "restart-probe")
+    spark.sql("create namespace if not exists dp.stack_probe")
+    spark.sql("create table if not exists dp.stack_probe.t (x int) using iceberg")
+    spark.sql("select count(*) from dp.stack_probe.t").collect()
+    r = subprocess.run(
+        ["docker", "compose", "restart", "postgres"], capture_output=True, text=True, check=False
+    )
+    assert r.returncode == 0, r.stderr[-500:]
+    _wait_for_postgres()
+    for _ in range(3):
+        assert spark.sql("select count(*) c from dp.stack_probe.t").collect()[0].c == 0
