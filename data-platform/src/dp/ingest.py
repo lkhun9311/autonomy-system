@@ -28,12 +28,17 @@ DDL = """create table if not exists ingest_commit (
 ACTIVATION_DDL = """create table if not exists ingest_activation (
   seq bigserial primary key, log_id text not null, commit_id uuid not null references ingest_commit(id),
   activated_at timestamptz not null default clock_timestamp())"""
+CHECK_DDL = """create table if not exists check_commit (
+  id uuid primary key, ingest_commit_id uuid not null references ingest_commit(id),
+  check_set_version text not null, committed_at timestamptz not null default clock_timestamp(),
+  unique (ingest_commit_id, check_set_version))"""
 _FIND = "select id from ingest_commit where log_id=%s and source_digest=%s and transform_version=%s"
 
 
 def ensure_schema(conn: psycopg.Connection) -> None:
     conn.execute(DDL)
     conn.execute(ACTIVATION_DDL)
+    conn.execute(CHECK_DDL)
 
 
 def _file_item(log_dir: Path, p: Path) -> bytes:

@@ -47,7 +47,7 @@ def test_sensor_rows_match_source_keys(spark):
     ).collect()
     assert Counter((r.log_id, r.sensor, r.timestamp_ns) for r in rows) == source_keys(d)
     assert written["sensor_data"] == sum(source_keys(d).values())
-    assert set(TABLES) == {"log", "sensor_data", "pose", "calibration", "track"}
+    assert set(TABLES) == {"log", "sensor_data", "sample", "map_raster", "pose", "calibration", "track"}
 
 
 def _fixture_ids() -> list[str]:

@@ -10,13 +10,16 @@ from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+import numpy as np
 from pyarrow import feather
 from pyspark.sql import SparkSession
 
 from dp.blob import BlobStore
 from dp.normalise.schema import ADDED_COLUMNS, DDL, NS
+from dp.sample import nearest_frames
 
-TABLES = tuple(DDL)
+# What normalisation writes, in write order. sweep_stat is in DDL but written by dp check, not here.
+TABLES = ("sensor_data", "sample", "map_raster", "pose", "calibration", "track", "log")
 _POSE = ("qw", "qx", "qy", "qz", "tx_m", "ty_m", "tz_m")
 _INTRINSICS = ("fx_px", "fy_px", "cx_px", "cy_px")
 _BOX = ("length_m", "width_m", "height_m")
@@ -83,6 +86,59 @@ def _sensor_rows(log_dir: Path, cid: str, store: BlobStore) -> list[dict]:
         )
 
 
+def _sample_rows(log: str, sensors: list[dict], cid: str) -> list[dict]:
+    """One sample per lidar sweep, from the sensor rows just written, so samples and rows agree."""
+    frames: dict[str, list[int]] = {}
+    sweeps: list[int] = []
+    for r in sensors:
+        if r["sensor"] == "lidar":
+            sweeps.append(r["timestamp_ns"])
+        else:
+            frames.setdefault(r["sensor"], []).append(r["timestamp_ns"])
+    for ts in frames.values():
+        ts.sort()
+    rows = []
+    for lidar_ts in sorted(sweeps):
+        near = nearest_frames(lidar_ts, frames)
+        rows.append(
+            {
+                "log_id": log,
+                "lidar_ts_ns": lidar_ts,
+                "cam_frame_ts": near,
+                "cam_skew_ns": {cam: ts - lidar_ts for cam, ts in near.items()},
+                "ingest_commit_id": cid,
+            }
+        )
+    return rows
+
+
+def _one(log_dir: Path, pattern: str) -> Path:
+    found = sorted((log_dir / "map").glob(pattern))
+    if len(found) != 1:
+        raise ValueError(f"{log_dir.name}: expected one map/{pattern}, found {len(found)}")
+    return found[0]
+
+
+def _map_raster_rows(log_dir: Path, cid: str, store: BlobStore) -> list[dict]:
+    npy = _one(log_dir, "*_ground_height_surface____*.npy")
+    sim2 = _one(log_dir, "*___img_Sim2_city.json")
+    checksum = _sha256(npy)
+    ref = store.put(npy, checksum)
+    height, width = np.load(npy, mmap_mode="r").shape
+    return [
+        {
+            "log_id": log_dir.name,
+            "raster_blob_uri": ref.uri,
+            "raster_blob_version_id": ref.version_id,
+            "raster_checksum": checksum,
+            "sim2_json": sim2.read_text(),
+            "height_px": int(height),
+            "width_px": int(width),
+            "ingest_commit_id": cid,
+        }
+    ]
+
+
 def _read(path: Path) -> list[dict]:
     return feather.read_table(path).to_pylist()
 
@@ -119,7 +175,7 @@ def _track_rows(log_dir: Path, cid: str) -> Iterator[dict]:
         )
 
 
-def _append(spark: SparkSession, table: str, rows: list[dict]) -> None:
+def append_rows(spark: SparkSession, table: str, rows: list[dict]) -> None:
     # Build against the table's own schema: inference fails on all-null columns and may widen types.
     schema = spark.table(f"{NS}.{table}").schema
     data = [tuple(r[f] for f in schema.fieldNames()) for r in rows]
@@ -147,15 +203,17 @@ def normalise_log(
     }
     parts = {
         "sensor_data": sensors,
+        "sample": _sample_rows(log_dir.name, sensors, ingest_commit_id),
+        "map_raster": _map_raster_rows(log_dir, ingest_commit_id, store),
         "pose": list(_pose_rows(log_dir, ingest_commit_id)),
         "calibration": list(_calibration_rows(log_dir, ingest_commit_id)),
         "track": list(_track_rows(log_dir, ingest_commit_id)),
         "log": [log_row],
     }
     written = {}
-    for table in ("sensor_data", "pose", "calibration", "track", "log"):
+    for table in TABLES:
         if parts[table]:
-            _append(spark, table, parts[table])
+            append_rows(spark, table, parts[table])
         written[table] = len(parts[table])
         if os.environ.get("DP_CRASH_AFTER_TABLE") == table:
             raise SystemExit(99)  # test hook: simulate a crash between table appends
