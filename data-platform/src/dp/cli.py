@@ -11,6 +11,8 @@ import psycopg
 
 from dp.blob import BlobStore, s3_client
 from dp.catalog import spark_session
+from dp.checks import CHECK_VERSIONS
+from dp.checks.run import run_checks
 from dp.config import load
 from dp.explore import camera_lidar_skew_ms
 from dp.ingest import ensure_schema, ingest, latest_commit
@@ -58,6 +60,19 @@ def cmd_verify_blobs(ids: list[str]) -> int:
     return rc
 
 
+def cmd_check(ids: list[str]) -> int:
+    rc = 0
+    for log_id in ids:
+        try:
+            ccid, n = run_checks(log_id)
+        except ValueError as e:
+            print(e)
+            rc = 1
+            continue
+        print(f"{log_id} check_commit={ccid} samples={n} rows={n * len(CHECK_VERSIONS)}")
+    return rc
+
+
 def cmd_reconcile(ids: list[str]) -> int:
     s = load()
     with psycopg.connect(s.pg_dsn, autocommit=True) as c:
@@ -92,6 +107,7 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("fetch").add_argument("list")
     sub.add_parser("ingest").add_argument("log_id", nargs="+", type=_log_id)
     sub.add_parser("reconcile").add_argument("log_id", nargs="+", type=_log_id)
+    sub.add_parser("check").add_argument("log_id", nargs="+", type=_log_id)
     sub.add_parser("verify-blobs").add_argument("log_id", nargs="+", type=_log_id)
     ex = sub.add_parser("explore")
     ex.add_argument("what", choices=["skew"])
@@ -106,6 +122,8 @@ def main(argv: list[str] | None = None) -> int:
         for log_id in a.log_id:
             print(log_id, ingest(_log_dir(log_id), TRANSFORM_VERSION))
         return 0
+    if a.cmd == "check":
+        return cmd_check(a.log_id)
     if a.cmd == "verify-blobs":
         return cmd_verify_blobs(a.log_id)
     if a.cmd == "reconcile":

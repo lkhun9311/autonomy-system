@@ -23,6 +23,9 @@ DDL = {
     "map_raster": f"""create table if not exists {NS}.map_raster (
         log_id string, raster_blob_uri string, raster_blob_version_id string, raster_checksum string,
         sim2_json string, height_px int, width_px int, ingest_commit_id string) using iceberg""",
+    "sweep_stat": f"""create table if not exists {NS}.sweep_stat (
+        log_id string, lidar_ts_ns bigint, check string, check_version int, metrics map<string, double>,
+        ingest_commit_id string, check_commit_id string) using iceberg partitioned by (log_id)""",
     "track": f"""create table if not exists {NS}.track (
         log_id string, timestamp_ns bigint, track_uuid string, category string,
         length_m double, width_m double, height_m double, qw double, qx double, qy double, qz double,

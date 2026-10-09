@@ -174,7 +174,7 @@ def _track_rows(log_dir: Path, cid: str) -> Iterator[dict]:
         )
 
 
-def _append(spark: SparkSession, table: str, rows: list[dict]) -> None:
+def append_rows(spark: SparkSession, table: str, rows: list[dict]) -> None:
     # Build against the table's own schema: inference fails on all-null columns and may widen types.
     schema = spark.table(f"{NS}.{table}").schema
     data = [tuple(r[f] for f in schema.fieldNames()) for r in rows]
@@ -212,7 +212,7 @@ def normalise_log(
     written = {}
     for table in ("sensor_data", "sample", "map_raster", "pose", "calibration", "track", "log"):
         if parts[table]:
-            _append(spark, table, parts[table])
+            append_rows(spark, table, parts[table])
         written[table] = len(parts[table])
         if os.environ.get("DP_CRASH_AFTER_TABLE") == table:
             raise SystemExit(99)  # test hook: simulate a crash between table appends
