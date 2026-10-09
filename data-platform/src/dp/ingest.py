@@ -15,6 +15,7 @@ from pathlib import Path
 import psycopg
 from pyiceberg.catalog import Catalog
 
+from dp.blob import BlobStore, s3_client
 from dp.canonical import digest
 from dp.catalog import pyiceberg_catalog, spark_session
 from dp.config import load
@@ -84,7 +85,7 @@ def ingest(log_dir: Path, transform_version: str) -> str:
         if hit:
             return _activate(conn, log_dir.name, str(hit[0]))
         cid = str(uuid.uuid4())
-        normalise_log(spark_session(s, "ingest"), log_dir, cid)
+        normalise_log(spark_session(s, "ingest"), log_dir, cid, BlobStore(s3_client(s)))
         cat = pyiceberg_catalog(s)
         snaps = snapshot_ids(cat, "av2", TABLES)
         with conn.transaction():  # the commit and its activation become visible together

@@ -9,14 +9,16 @@ from pathlib import Path
 
 import psycopg
 
+from dp.blob import BlobStore, s3_client
 from dp.catalog import spark_session
 from dp.config import load
 from dp.explore import camera_lidar_skew_ms
 from dp.ingest import ensure_schema, ingest, latest_commit
 from dp.reconcile import compare
 from dp.source.av2 import source_keys
+from dp.verify import pinned_rows, verify_rows
 
-TRANSFORM_VERSION = "s1"
+TRANSFORM_VERSION = "s2"
 # The fetch helper lives in the source checkout, not in the wheel: `dp fetch` is a development command.
 FETCH_SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "fetch_av2.sh"
 _LOG_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*")
@@ -31,6 +33,29 @@ def _log_id(value: str) -> str:
 
 def _log_dir(log_id: str) -> Path:
     return load().data_dir / "sensor" / "val" / log_id
+
+
+def cmd_verify_blobs(ids: list[str]) -> int:
+    s = load()
+    with psycopg.connect(s.pg_dsn, autocommit=True) as c:
+        ensure_schema(c)
+        latest = {log_id: latest_commit(c, log_id) for log_id in ids}
+    spark = spark_session(s, "verify-blobs")
+    store = BlobStore(s3_client(s))
+    rc = 0
+    for log_id in ids:
+        cid = latest[log_id]
+        if cid is None:
+            print(f"{log_id} not ingested")
+            rc = 1
+            continue
+        r = verify_rows(store, pinned_rows(spark, "dp.av2.sensor_data", log_id, cid))
+        print(f"{log_id} commit={cid} checked={r.checked} failures={len(r.failures)}")
+        for f in r.failures:
+            print(f"  {f.object} version={f.version_id} expected={f.expected} actual={f.actual}")
+        if r.failures or r.checked == 0:
+            rc = 1
+    return rc
 
 
 def cmd_reconcile(ids: list[str]) -> int:
@@ -67,6 +92,7 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("fetch").add_argument("list")
     sub.add_parser("ingest").add_argument("log_id", nargs="+", type=_log_id)
     sub.add_parser("reconcile").add_argument("log_id", nargs="+", type=_log_id)
+    sub.add_parser("verify-blobs").add_argument("log_id", nargs="+", type=_log_id)
     ex = sub.add_parser("explore")
     ex.add_argument("what", choices=["skew"])
     ex.add_argument("log_id", type=_log_id)
@@ -80,6 +106,8 @@ def main(argv: list[str] | None = None) -> int:
         for log_id in a.log_id:
             print(log_id, ingest(_log_dir(log_id), TRANSFORM_VERSION))
         return 0
+    if a.cmd == "verify-blobs":
+        return cmd_verify_blobs(a.log_id)
     if a.cmd == "reconcile":
         return cmd_reconcile(a.log_id)
     if a.cmd == "explore":
