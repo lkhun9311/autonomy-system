@@ -16,7 +16,7 @@ from dp.explore import camera_lidar_skew_ms
 from dp.ingest import ensure_schema, ingest, latest_commit
 from dp.reconcile import compare
 from dp.source.av2 import source_keys
-from dp.verify import verify_rows
+from dp.verify import pinned_rows, verify_rows
 
 TRANSFORM_VERSION = "s2"
 # The fetch helper lives in the source checkout, not in the wheel: `dp fetch` is a development command.
@@ -49,11 +49,7 @@ def cmd_verify_blobs(ids: list[str]) -> int:
             print(f"{log_id} not ingested")
             rc = 1
             continue
-        rows = spark.sql(
-            "select blob_uri, blob_version_id, checksum from dp.av2.sensor_data "
-            f"where log_id = '{log_id}' and ingest_commit_id = '{cid}'"
-        ).collect()
-        r = verify_rows(store, (row.asDict() for row in rows))
+        r = verify_rows(store, pinned_rows(spark, "dp.av2.sensor_data", log_id, cid))
         print(f"{log_id} commit={cid} checked={r.checked} failures={len(r.failures)}")
         for f in r.failures:
             print(f"  {f.object} version={f.version_id} expected={f.expected} actual={f.actual}")

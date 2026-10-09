@@ -9,9 +9,10 @@ from pathlib import Path
 import pytest
 
 from dp.blob import BUCKET, BlobRef, BlobStore, key_for, s3_client
+from dp.catalog import spark_session
 from dp.cli import main as dp_main
 from dp.config import load
-from dp.verify import verify_rows
+from dp.verify import pinned_rows, verify_rows
 
 pytestmark = pytest.mark.integration
 
@@ -108,3 +109,21 @@ def test_a_forged_current_version_is_pinned_by_ingest_and_caught_by_verify(monke
         assert dp_main(["verify-blobs", log_id]) == 1
         out = capsys.readouterr().out
         assert "failures=1" in out and key_for(sha) in out and hashlib.sha256(b"forged").hexdigest() in out
+
+
+def test_a_table_from_before_s2_reports_no_blob_pinned_instead_of_crashing():
+    spark = spark_session(load(), "verify-s1-schema")
+    ns = f"dp.verify_probe_{uuid.uuid4().hex[:8]}"
+    spark.sql(f"create namespace {ns}")
+    try:
+        spark.sql(
+            f"create table {ns}.sensor_data (log_id string, sensor string, timestamp_ns bigint, "
+            "checksum string, ingest_commit_id string) using iceberg"
+        )
+        spark.sql(f"insert into {ns}.sensor_data values ('L', 'lidar', 1, 'ab', 'c1')")
+        rows = pinned_rows(spark, f"{ns}.sensor_data", "L", "c1")
+        assert rows == [{"blob_uri": None, "blob_version_id": None, "checksum": "ab"}]
+        assert [f.actual for f in verify_rows(_store(), rows).failures] == ["no blob pinned"]
+    finally:
+        spark.sql(f"drop table if exists {ns}.sensor_data purge")
+        spark.sql(f"drop namespace if exists {ns}")
